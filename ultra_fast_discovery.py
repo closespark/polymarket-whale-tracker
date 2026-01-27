@@ -84,8 +84,14 @@ class UltraFastDiscovery:
             print(f"   Trades: {stats['trade_count']:,}")
             print(f"   Block range: {stats['oldest_block']:,} → {stats['newest_block']:,}")
             print(f"   Coverage: {stats['block_range']:,} blocks")
+
+            # Check if pruning needed (will run AFTER tier analysis)
+            self._needs_startup_prune = stats['block_range'] > self.keep_blocks
+            if self._needs_startup_prune:
+                print(f"   ⚠️ Database bloated - will prune after tier analysis")
             # Whale tiers are populated separately from database analysis
         else:
+            self._needs_startup_prune = False  # No data, nothing to prune
             # Skip deep scan on Render (memory constrained)
             # Instead, build up data via incremental scans
             import os
@@ -273,6 +279,13 @@ class UltraFastDiscovery:
 
         # Export whale stats
         self.db.export_to_csv('whale_specialists.csv')
+
+        # Check if we need to run startup prune (deferred until after tier analysis)
+        if getattr(self, '_needs_startup_prune', False):
+            print(f"\n🧹 STARTUP PRUNE: Database bloated, cleaning up...")
+            deleted = self.db.prune_old_blocks(keep_blocks=self.keep_blocks)
+            print(f"   🗑️ Pruned {deleted:,} old trades (keeping last {self.keep_blocks//1000}K blocks)")
+            self._needs_startup_prune = False  # Only run once
 
     async def prune_loop(self):
         """
