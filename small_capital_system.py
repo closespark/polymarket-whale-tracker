@@ -716,14 +716,26 @@ class SmallCapitalSystem:
 
             # Convert to list of whale dicts
             specialists = []
-            for addr in monitoring_pool:
-                whale_info = whale_db.get(addr, {})
-                specialists.append({
-                    'address': addr,
-                    'win_rate': whale_info.get('estimated_win_rate', 0.72),
-                    'trade_count': whale_info.get('trade_count', 0),
-                    'profit': whale_info.get('estimated_profit', 0)
-                })
+            for item in monitoring_pool:
+                # Handle both dict format (from ultra_fast_discovery) and string format
+                if isinstance(item, dict):
+                    addr = item.get('address', '')
+                    specialists.append({
+                        'address': addr,
+                        'win_rate': item.get('estimated_win_rate', 0.72),
+                        'trade_count': item.get('trade_count', 0),
+                        'profit': item.get('estimated_profit', 0)
+                    })
+                else:
+                    # String address
+                    addr = item
+                    whale_info = whale_db.get(addr, {})
+                    specialists.append({
+                        'address': addr,
+                        'win_rate': whale_info.get('estimated_win_rate', 0.72),
+                        'trade_count': whale_info.get('trade_count', 0),
+                        'profit': whale_info.get('estimated_profit', 0)
+                    })
 
             # Sort by win rate
             specialists.sort(key=lambda x: x['win_rate'], reverse=True)
