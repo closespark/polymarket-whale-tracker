@@ -410,17 +410,29 @@ class MultiTimeframeStrategy:
             True if loaded successfully
         """
         try:
+            # Check metadata quality - if mostly unknown, clear cache and refetch
+            if hasattr(db, 'get_metadata_quality'):
+                quality = db.get_metadata_quality()
+                known = quality.get('known', 0)
+                unknown = quality.get('unknown', 0)
+                total_meta = quality.get('total', 0)
+
+                # If we have metadata but >90% is unknown, clear and refetch
+                if total_meta > 100 and unknown > 0 and (unknown / total_meta) > 0.90:
+                    print(f"   Poor metadata quality ({known} known, {unknown} unknown) - clearing cache...")
+                    db.clear_timeframe_cache()
+
             # First check if we have cached tiers
             tiers_data = db.get_timeframe_tiers()
 
             # Check if we have any data
             total = sum(len(t) for t in tiers_data.values())
-            if total == 0:
-                # Need to run analysis first
-                print("   Running multi-timeframe analysis (first startup only)...")
+            if total == 0 or total <= 1:
+                # Need to run analysis first (or re-run if only 1 specialist found)
+                print("   Running multi-timeframe analysis...")
 
                 # Fetch market metadata if needed (queries Polymarket API)
-                print("   Fetching market metadata from Polymarket API...")
+                print("   Fetching market metadata from Polymarket Gamma API...")
                 db.fetch_market_timeframes(max_tokens=2000)
 
                 # Run the analysis

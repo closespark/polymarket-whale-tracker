@@ -759,6 +759,36 @@ class TradeDatabase:
 
         return tiers
 
+    def clear_timeframe_cache(self):
+        """Clear cached market metadata and tier assignments to force re-analysis"""
+        self.conn.execute("DELETE FROM market_metadata")
+        self.conn.execute("DELETE FROM whale_timeframe_stats")
+        self.conn.commit()
+        print("   Cleared timeframe cache")
+
+    def get_metadata_quality(self) -> dict:
+        """Check the quality of cached market metadata"""
+        cursor = self.conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN timeframe = 'unknown' THEN 1 ELSE 0 END) as unknown,
+                SUM(CASE WHEN timeframe = '15min' THEN 1 ELSE 0 END) as min15,
+                SUM(CASE WHEN timeframe = 'hourly' THEN 1 ELSE 0 END) as hourly,
+                SUM(CASE WHEN timeframe = '4hour' THEN 1 ELSE 0 END) as hour4,
+                SUM(CASE WHEN timeframe = 'daily' THEN 1 ELSE 0 END) as daily
+            FROM market_metadata
+        """)
+        row = cursor.fetchone()
+        return {
+            'total': row[0] or 0,
+            'unknown': row[1] or 0,
+            'known': (row[0] or 0) - (row[1] or 0),
+            '15min': row[2] or 0,
+            'hourly': row[3] or 0,
+            '4hour': row[4] or 0,
+            'daily': row[5] or 0
+        }
+
     def close(self):
         """Close database connection"""
         if self.conn:
