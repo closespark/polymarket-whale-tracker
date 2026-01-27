@@ -504,53 +504,87 @@ class TradeDatabase:
             print("   requests library not available, skipping API fetch")
             return 0
 
-        tokens = self.get_unique_tokens(limit=max_tokens)
+        tokens_needed = set(self.get_unique_tokens(limit=max_tokens))
 
         # Check how many we already have cached
-        cached_count = 0
-        uncached_tokens = []
-        for token in tokens:
-            if self.get_cached_timeframe(token):
-                cached_count += 1
-            else:
-                uncached_tokens.append(token)
+        cursor = self.conn.execute("SELECT token_id FROM market_metadata")
+        cached_tokens = set(row[0] for row in cursor.fetchall())
+
+        uncached_tokens = tokens_needed - cached_tokens
+        cached_count = len(tokens_needed) - len(uncached_tokens)
 
         if not uncached_tokens:
             print(f"   All {cached_count} tokens already cached")
             return cached_count
 
-        print(f"   {cached_count} cached, {len(uncached_tokens)} to fetch...")
+        print(f"   {cached_count} cached, {len(uncached_tokens)} need metadata...")
 
-        fetched = 0
-        for i, token in enumerate(uncached_tokens[:500]):  # Limit to 500 new fetches per run
+        # Fetch all markets from CLOB API and build token->question mapping
+        print(f"   Fetching markets from Polymarket CLOB API...")
+
+        token_to_question = {}
+        next_cursor = None
+        page = 0
+        max_pages = 50  # Limit pages to avoid infinite loop
+
+        while page < max_pages:
             try:
-                # Try CLOB API
-                url = f"https://clob.polymarket.com/markets/{token}"
-                response = requests.get(url, timeout=5)
+                url = "https://clob.polymarket.com/markets"
+                params = {"limit": 100}
+                if next_cursor:
+                    params["next_cursor"] = next_cursor
 
-                if response.status_code == 200:
-                    market = response.json()
-                    question = market.get('question', '') or market.get('title', '')
-                    timeframe = self._infer_timeframe_from_question(question)
-                    self.cache_token_timeframe(token, timeframe, question[:200])
-                    fetched += 1
-                else:
-                    # Mark as unknown so we don't retry
-                    self.cache_token_timeframe(token, 'unknown', '')
+                response = requests.get(url, params=params, timeout=15)
 
-                # Rate limit
-                if fetched % 20 == 0:
-                    time.sleep(batch_delay)
+                if response.status_code != 200:
+                    print(f"   API returned {response.status_code}")
+                    break
 
-                # Progress
-                if (i + 1) % 100 == 0:
-                    print(f"      Fetched {i+1}/{len(uncached_tokens[:500])} tokens...")
+                data = response.json()
+                markets = data.get('data', data) if isinstance(data, dict) else data
+
+                if not markets:
+                    break
+
+                for market in markets:
+                    question = market.get('question', '')
+                    tokens = market.get('tokens', [])
+
+                    for token_data in tokens:
+                        token_id = str(token_data.get('token_id', ''))
+                        if token_id and token_id in uncached_tokens:
+                            token_to_question[token_id] = question
+
+                # Check for next page
+                next_cursor = data.get('next_cursor') if isinstance(data, dict) else None
+                page += 1
+
+                if page % 10 == 0:
+                    print(f"      Fetched {page} pages, found {len(token_to_question)} matching tokens...")
+
+                if not next_cursor:
+                    break
+
+                time.sleep(0.2)  # Rate limit
 
             except Exception as e:
-                self.cache_token_timeframe(token, 'unknown', '')
-                continue
+                print(f"   API error: {e}")
+                break
 
-        print(f"   Fetched {fetched} new market metadata entries")
+        print(f"   Found metadata for {len(token_to_question)} tokens")
+
+        # Cache the results
+        fetched = 0
+        for token_id, question in token_to_question.items():
+            timeframe = self._infer_timeframe_from_question(question)
+            self.cache_token_timeframe(token_id, timeframe, question[:200])
+            fetched += 1
+
+        # Mark remaining as unknown so we don't retry them
+        for token_id in uncached_tokens - set(token_to_question.keys()):
+            self.cache_token_timeframe(token_id, 'unknown', '')
+
+        print(f"   Cached {fetched} new market timeframes")
         return cached_count + fetched
 
     def analyze_traders_by_timeframe(self) -> Dict[str, List[Dict]]:
