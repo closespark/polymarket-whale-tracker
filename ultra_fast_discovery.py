@@ -277,7 +277,8 @@ class UltraFastDiscovery:
 
     async def update_pool(self):
         """
-        Update monitoring pool based on latest data
+        Update internal whale database rankings (for export/stats only)
+        Note: Actual monitoring uses tier whales from multi_tf_strategy
         """
 
         ranked = []
@@ -311,22 +312,7 @@ class UltraFastDiscovery:
             })
 
         ranked.sort(key=lambda x: x['score'], reverse=True)
-
-        old_pool = set(w['address'] for w in self.monitoring_pool)
-        new_pool = ranked[:25]
-        new_addresses = set(w['address'] for w in new_pool)
-
-        added = new_addresses - old_pool
-        removed = old_pool - new_addresses
-
-        self.monitoring_pool = new_pool
-
-        if added or removed:
-            print(f"\n   🔄 Pool updated: {len(new_pool)} whales")
-            if added:
-                print(f"      📈 Added {len(added)}")
-            if removed:
-                print(f"      📉 Removed {len(removed)}")
+        self.monitoring_pool = ranked[:25]
 
         self.export_state()
 
@@ -347,7 +333,7 @@ class UltraFastDiscovery:
             json.dump(stats, f, indent=2)
 
     async def print_stats_loop(self):
-        """Print stats every 2 minutes"""
+        """Print database stats every 2 minutes"""
 
         while True:
             await asyncio.sleep(120)
@@ -355,19 +341,10 @@ class UltraFastDiscovery:
             db_stats = self.db.get_database_stats()
 
             print("\n" + "-"*80)
-            print(f"📊 STATS - {datetime.now().strftime('%H:%M:%S')}")
+            print(f"📊 DISCOVERY STATS - {datetime.now().strftime('%H:%M:%S')}")
             print("-"*80)
             print(f"🗄️  Database: {db_stats['trade_count']:,} trades, {db_stats['block_range']:,} blocks")
-            print(f"🐋 Total whales: {len(self.whale_database)}")
-            print(f"👀 Monitoring: {len(self.monitoring_pool)}")
-
-            # Show top 5
-            print(f"\n🏆 TOP 5:")
-            for i, w in enumerate(self.monitoring_pool[:5], 1):
-                profit = w.get('estimated_profit', 0)
-                win_rate = w.get('estimated_win_rate', 0) * 100
-                print(f"   #{i} {w['address'][:10]}... (${profit:,.0f} profit, {win_rate:.0f}% WR)")
-
+            print(f"📡 Last scanned block: {db_stats.get('last_scanned', 'N/A')}")
             print("-"*80 + "\n")
 
     def get_monitoring_addresses(self):
