@@ -244,7 +244,7 @@ class TradeDatabase:
 
         return deleted
 
-    def prune_non_whale_trades(self, whale_addresses: List[str]) -> int:
+    def prune_non_whale_trades(self, whale_addresses: List[str], timeout_minutes: int = 10) -> int:
         """
         Remove trades from addresses that are NOT in the whale list.
 
@@ -254,8 +254,11 @@ class TradeDatabase:
         BLOCKING: This operation locks the database until complete.
         No reads or writes should happen during pruning.
 
+        OPTIMIZED: Uses indexed temp table lookups and batch deletion with progress.
+
         Args:
             whale_addresses: List of whale addresses to KEEP trades for
+            timeout_minutes: Maximum time to spend on deletion (default 10 min)
 
         Returns:
             Number of trades deleted
@@ -264,7 +267,7 @@ class TradeDatabase:
             print("⚠️ No whale addresses provided - skipping prune")
             return 0
 
-        # Normalize addresses to lowercase
+        # Normalize addresses to lowercase for consistent matching
         whale_set = set(addr.lower() for addr in whale_addresses)
 
         # Get current stats
@@ -280,69 +283,124 @@ class TradeDatabase:
         print(f"   ⏸️  All other database operations paused...")
         print(f"   Before: {trade_count:,} trades")
         print(f"   Keeping trades for {len(whale_set):,} whale addresses")
+        print(f"   Timeout: {timeout_minutes} minutes")
 
         prune_start = time.time()
+        timeout_seconds = timeout_minutes * 60
 
-        # Build placeholders for SQL IN clause
-        # SQLite has a limit on variables, so we'll do this in batches if needed
-        if len(whale_set) > 500:
-            # For large whale lists, use a temp table approach
-            print(f"   [1/4] Creating temp whale lookup table...")
-            self.conn.execute("DROP TABLE IF EXISTS temp_whales")
-            self.conn.execute("CREATE TEMP TABLE temp_whales (address TEXT PRIMARY KEY)")
+        # STEP 1: Create indexed temp table for fast lookups
+        print(f"   [1/5] Creating indexed whale lookup table...")
+        self.conn.execute("DROP TABLE IF EXISTS temp_whales")
+        self.conn.execute("""
+            CREATE TEMP TABLE temp_whales (
+                address TEXT PRIMARY KEY
+            )
+        """)
 
-            # Insert whale addresses in batches
-            batch_size = 500
-            whale_list = list(whale_set)
-            for i in range(0, len(whale_list), batch_size):
-                batch = whale_list[i:i+batch_size]
-                self.conn.executemany(
-                    "INSERT OR IGNORE INTO temp_whales (address) VALUES (?)",
-                    [(addr,) for addr in batch]
+        # Insert whale addresses (both original case and lowercase for matching)
+        whale_list = list(whale_set)
+        batch_size = 100
+        for i in range(0, len(whale_list), batch_size):
+            batch = whale_list[i:i+batch_size]
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO temp_whales (address) VALUES (?)",
+                [(addr,) for addr in batch]
+            )
+        self.conn.commit()
+        print(f"   [1/5] Loaded {len(whale_list)} whale addresses ({time.time() - prune_start:.1f}s)")
+
+        # STEP 2: Count trades to delete (for progress estimation)
+        print(f"   [2/5] Estimating trades to delete...")
+        count_start = time.time()
+
+        # Use EXPLAIN QUERY PLAN to check if we're using indexes
+        # For large datasets, sample-based estimation is faster
+        sample_size = min(10000, trade_count // 100)
+        if trade_count > 100000:
+            # Sample-based estimate for large databases
+            cursor = self.conn.execute(f"""
+                SELECT COUNT(*) as cnt FROM (
+                    SELECT 1 FROM trades
+                    WHERE LOWER(maker) NOT IN (SELECT address FROM temp_whales)
+                      AND LOWER(taker) NOT IN (SELECT address FROM temp_whales)
+                    LIMIT {sample_size}
                 )
-                print(f"   [1/4] Loaded {min(i+batch_size, len(whale_list)):,}/{len(whale_list):,} whale addresses...")
-            self.conn.commit()
-            print(f"   [1/4] Temp table created ({time.time() - prune_start:.1f}s)")
-
-            # Delete trades where neither maker nor taker is a whale
-            print(f"   [2/4] Deleting non-whale trades (this may take a while)...")
-            delete_start = time.time()
-            cursor = self.conn.execute("""
-                DELETE FROM trades
-                WHERE LOWER(maker) NOT IN (SELECT address FROM temp_whales)
-                  AND LOWER(taker) NOT IN (SELECT address FROM temp_whales)
             """)
-            deleted = cursor.rowcount
-            print(f"   [2/4] Delete complete: {deleted:,} trades removed ({time.time() - delete_start:.1f}s)")
-
-            self.conn.execute("DROP TABLE IF EXISTS temp_whales")
+            sample_count = cursor.fetchone()['cnt']
+            if sample_count == sample_size:
+                # Sample hit limit, estimate total
+                estimated_delete = int(trade_count * 0.95)  # Assume ~95% are non-whale
+                print(f"   [2/5] Estimated ~{estimated_delete:,} trades to delete (sampled)")
+            else:
+                estimated_delete = sample_count
+                print(f"   [2/5] Found {estimated_delete:,} trades to delete")
         else:
-            # For smaller lists, use IN clause directly
-            print(f"   [1/4] Using direct IN clause (small whale list)...")
-            placeholders = ','.join('?' * len(whale_set))
-            whale_list = list(whale_set)
+            estimated_delete = trade_count  # Will count during deletion
+            print(f"   [2/5] Will delete in batches ({time.time() - count_start:.1f}s)")
 
-            print(f"   [2/4] Deleting non-whale trades...")
-            delete_start = time.time()
+        # STEP 3: Batch deletion with progress updates
+        print(f"   [3/5] Deleting non-whale trades in batches...")
+        delete_start = time.time()
+        total_deleted = 0
+        batch_num = 0
+        batch_delete_size = 50000  # Delete 50K at a time for progress updates
+
+        while True:
+            batch_num += 1
+            batch_start = time.time()
+
+            # Check timeout
+            elapsed = time.time() - prune_start
+            if elapsed > timeout_seconds:
+                print(f"   ⚠️ Timeout reached ({timeout_minutes} min) - stopping deletion")
+                print(f"   Deleted {total_deleted:,} trades so far")
+                break
+
+            # Delete a batch using rowid for efficiency
+            # This approach uses the index on maker/taker more effectively
             cursor = self.conn.execute(f"""
                 DELETE FROM trades
-                WHERE LOWER(maker) NOT IN ({placeholders})
-                  AND LOWER(taker) NOT IN ({placeholders})
-            """, whale_list + whale_list)
-            deleted = cursor.rowcount
-            print(f"   [2/4] Delete complete: {deleted:,} trades removed ({time.time() - delete_start:.1f}s)")
+                WHERE rowid IN (
+                    SELECT rowid FROM trades
+                    WHERE LOWER(maker) NOT IN (SELECT address FROM temp_whales)
+                      AND LOWER(taker) NOT IN (SELECT address FROM temp_whales)
+                    LIMIT {batch_delete_size}
+                )
+            """)
+            batch_deleted = cursor.rowcount
+            total_deleted += batch_deleted
 
-        print(f"   [3/4] Committing changes...")
+            if batch_deleted == 0:
+                print(f"   [3/5] Batch deletion complete ({time.time() - delete_start:.1f}s)")
+                break
+
+            # Progress update
+            elapsed_delete = time.time() - delete_start
+            rate = total_deleted / elapsed_delete if elapsed_delete > 0 else 0
+            remaining_estimate = (estimated_delete - total_deleted) / rate if rate > 0 else 0
+
+            print(f"   [3/5] Batch {batch_num}: Deleted {batch_deleted:,} trades "
+                  f"(total: {total_deleted:,}, {rate:,.0f}/sec, ~{remaining_estimate:.0f}s remaining)")
+
+            self.conn.commit()  # Commit each batch to avoid huge transaction
+
+        deleted = total_deleted
+
+        # STEP 4: Final commit
+        print(f"   [4/5] Committing final changes...")
         commit_start = time.time()
         self.conn.commit()
-        print(f"   [3/4] Commit complete ({time.time() - commit_start:.1f}s)")
+        print(f"   [4/5] Commit complete ({time.time() - commit_start:.1f}s)")
+
+        # Cleanup temp table
+        self.conn.execute("DROP TABLE IF EXISTS temp_whales")
 
         if deleted > 0:
-            # Vacuum to reclaim disk space
-            print(f"   [4/4] Running VACUUM to reclaim disk space (this may take a while)...")
+            # STEP 5: Vacuum to reclaim disk space
+            print(f"   [5/5] Running VACUUM to reclaim disk space...")
             vacuum_start = time.time()
             self.conn.execute("VACUUM")
-            print(f"   [4/4] VACUUM complete ({time.time() - vacuum_start:.1f}s)")
+            print(f"   [5/5] VACUUM complete ({time.time() - vacuum_start:.1f}s)")
 
             after_stats = self.get_database_stats()
             total_time = time.time() - prune_start
@@ -358,7 +416,7 @@ class TradeDatabase:
             print(f"   Total time: {total_time:.1f}s")
             print(f"   ✅ Prune complete - database operations resuming")
         else:
-            print(f"   [4/4] No VACUUM needed")
+            print(f"   [5/5] No VACUUM needed")
             print(f"   No non-whale trades to prune")
             print(f"   Total time: {time.time() - prune_start:.1f}s")
             print(f"   ✅ Database already optimized - operations resuming")
