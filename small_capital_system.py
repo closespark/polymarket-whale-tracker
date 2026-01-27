@@ -241,6 +241,12 @@ from websocket_monitor import WebSocketTradeMonitor, HybridMonitor
 from dry_run_analytics import DryRunAnalytics, get_analytics
 from whale_intelligence import WhaleIntelligence, create_whale_intelligence
 from multi_timeframe_strategy import MultiTimeframeStrategy, create_multi_timeframe_strategy
+
+# Live trading components
+from order_executor import get_order_executor, OrderExecutor
+from position_manager import get_position_manager, PositionManager
+from market_resolver import get_market_resolver, MarketResolver
+
 import config
 
 
@@ -661,6 +667,15 @@ class SmallCapitalSystem:
         # v3: Pending position tracker (profit only on market resolution)
         self.position_tracker = PendingPositionTracker(self)
 
+        # v4: Live trading components (initialized when needed)
+        self.order_executor = None
+        self.position_manager = None
+        self.market_resolver = None
+
+        # Initialize live trading components if enabled
+        if config.AUTO_COPY_ENABLED:
+            self._initialize_live_trading()
+
         # Stats tracking
         self.stats = {
             'start_time': datetime.now(),
@@ -686,6 +701,34 @@ class SmallCapitalSystem:
         print(f"   Whale intelligence: ENABLED")
         print(f"   Multi-timeframe: ENABLED")
         print(f"   Embedded dashboard: ENABLED (port 8080)")
+        print(f"   Live trading: {'ENABLED' if config.AUTO_COPY_ENABLED else 'DISABLED (dry run)'}")
+
+    def _initialize_live_trading(self):
+        """Initialize live trading components (OrderExecutor, PositionManager, MarketResolver)"""
+        try:
+            print("\n🔧 Initializing live trading components...")
+
+            # Order executor for placing trades
+            self.order_executor = get_order_executor()
+            if self.order_executor.initialized:
+                print("   ✅ OrderExecutor: Ready")
+                balance = self.order_executor.get_usdc_balance()
+                print(f"      USDC Balance: ${balance:.2f}")
+            else:
+                print("   ⚠️ OrderExecutor: Not initialized (check credentials)")
+
+            # Position manager for tracking open positions
+            self.position_manager = get_position_manager()
+            pending = self.position_manager.get_pending_positions()
+            print(f"   ✅ PositionManager: Ready ({len(pending)} existing positions)")
+
+            # Market resolver for detecting market outcomes
+            self.market_resolver = get_market_resolver()
+            print(f"   ✅ MarketResolver: Ready")
+
+        except Exception as e:
+            print(f"   ❌ Error initializing live trading: {e}")
+            print(f"      System will continue in dry run mode")
     
     async def run(self):
         """
@@ -747,15 +790,29 @@ class SmallCapitalSystem:
             self.position_resolution_loop()
         )
 
+        # v4: Market resolver loop for live trading (polls for market outcomes)
+        market_resolver_task = None
+        if config.AUTO_COPY_ENABLED and self.market_resolver:
+            market_resolver_task = asyncio.create_task(
+                self.market_resolver.start_resolution_loop(
+                    system_callback=self._on_position_resolved
+                )
+            )
+            print("🔍 Market resolver loop started (polling for market outcomes)")
+
         try:
-            await asyncio.gather(
+            tasks = [
                 discovery_task,
                 monitoring_task,
                 stats_task,
                 compound_task,
                 intel_task,
                 resolution_task
-            )
+            ]
+            if market_resolver_task:
+                tasks.append(market_resolver_task)
+
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             print("\n⚠️  System stopped")
             self.print_final_summary()
@@ -975,11 +1032,63 @@ class SmallCapitalSystem:
         print(f"Market timeframe: {trade_data.get('market_timeframe', '15min')}")
 
         # Execute (or simulate)
-        if config.AUTO_COPY_ENABLED:
-            result = await self.copier.copy_trade(trade_data, position_size)
-            # In live mode, position is tracked separately
-            # For now, still add to pending tracker
-            self.position_tracker.add_position(trade_data, position_size, confidence)
+        if config.AUTO_COPY_ENABLED and self.order_executor and self.order_executor.initialized:
+            # LIVE TRADING MODE
+            print(f"🟢 LIVE MODE - Executing real trade...")
+
+            try:
+                # Get token_id for the market
+                token_id = trade_data.get('token_id', '')
+                side = trade_data.get('side', trade_data.get('net_side', 'BUY'))
+                whale_price = trade_data.get('price', None)
+
+                if not token_id:
+                    print(f"   ⚠️ No token_id in trade data - skipping live execution")
+                    return
+
+                # Place the order
+                order_result = await self.order_executor.place_order(
+                    token_id=token_id,
+                    side=side,
+                    usdc_amount=position_size,
+                    whale_price=whale_price
+                )
+
+                if order_result['success']:
+                    print(f"   ✅ Order placed successfully!")
+                    print(f"      Order ID: {order_result.get('order_id', 'N/A')}")
+                    print(f"      Price: {order_result.get('execution_price', 'N/A')}")
+                    print(f"      Quantity: {order_result.get('quantity', 'N/A')}")
+
+                    # Record in position manager
+                    if self.position_manager:
+                        # Prepare order_result dict for position manager
+                        order_data = {
+                            'order_id': order_result.get('order_id', ''),
+                            'token_id': token_id,
+                            'side': side,
+                            'quantity': order_result.get('quantity', 0),
+                            'price': order_result.get('execution_price', 0),
+                            'total_cost': position_size,
+                            'fill_status': order_result.get('fill_status', 'filled')
+                        }
+
+                        # Add confidence to trade_data for storage
+                        trade_data['confidence'] = confidence
+
+                        self.position_manager.record_position(
+                            order_result=order_data,
+                            trade_data=trade_data,
+                            market_info=order_result.get('market_info')
+                        )
+                else:
+                    print(f"   ❌ Order failed: {order_result.get('error', 'Unknown error')}")
+                    print(f"      Reason: {order_result.get('reason', 'N/A')}")
+
+            except Exception as e:
+                print(f"   ❌ Live execution error: {e}")
+                import traceback
+                traceback.print_exc()
         else:
             # DRY RUN MODE: Add to pending position tracker
             # Profit will be calculated when market resolves (based on timeframe)
@@ -1397,16 +1506,98 @@ class SmallCapitalSystem:
             await asyncio.sleep(30)
 
             try:
-                # Check for positions to resolve
-                await self.position_tracker.check_and_resolve_positions()
+                if config.AUTO_COPY_ENABLED and self.market_resolver:
+                    # LIVE MODE: Use MarketResolver to check actual market outcomes
+                    await self.market_resolver.check_and_resolve_positions(
+                        system_callback=self._on_position_resolved
+                    )
 
-                # Print pending summary every 5 minutes worth of checks
-                pending = self.position_tracker.get_pending_summary()
-                if pending['pending_count'] > 0:
-                    print(f"\n⏳ Pending positions: {pending['pending_count']} (${pending['pending_total']:.2f})")
+                    # Print pending summary from position manager
+                    if self.position_manager:
+                        summary = self.position_manager.get_position_summary()
+                        if summary.get('pending_count', 0) > 0:
+                            print(f"\n⏳ Live positions: {summary['pending_count']} pending (${summary.get('pending_value', 0):.2f})")
+                else:
+                    # DRY RUN MODE: Use simulated position tracker
+                    await self.position_tracker.check_and_resolve_positions()
+
+                    # Print pending summary
+                    pending = self.position_tracker.get_pending_summary()
+                    if pending['pending_count'] > 0:
+                        print(f"\n⏳ Pending positions: {pending['pending_count']} (${pending['pending_total']:.2f})")
 
             except Exception as e:
                 print(f"   ⚠️ Position resolution error: {e}")
+
+    async def _on_position_resolved(self, resolved_position: dict):
+        """Callback when a live position is resolved by MarketResolver"""
+        try:
+            profit = resolved_position.get('pnl', 0)
+            is_win = resolved_position.get('is_win', False)
+            position_size = resolved_position.get('total_cost', 0)
+
+            # Update stats
+            self.stats['copies'] += 1
+            self.current_capital += profit
+            self.stats['total_profit'] += profit
+            self.stats['current_capital'] = self.current_capital
+
+            if is_win:
+                self.stats['wins'] += 1
+                self.stats['consecutive_wins'] += 1
+                self.stats['max_consecutive_wins'] = max(
+                    self.stats['max_consecutive_wins'],
+                    self.stats['consecutive_wins']
+                )
+                if profit > self.stats['best_trade']:
+                    self.stats['best_trade'] = profit
+            else:
+                self.stats['losses'] += 1
+                self.stats['consecutive_wins'] = 0
+                if profit < self.stats['worst_trade']:
+                    self.stats['worst_trade'] = profit
+
+            # Update ROI
+            self.stats['roi_percent'] = (
+                (self.current_capital - self.starting_capital) / self.starting_capital * 100
+            )
+
+            # Update risk manager
+            self.risk_manager.update_capital(self.current_capital)
+            self.position_sizer.record_trade_result(profit, is_win)
+
+            # Reconstruct trade_data from position for logging
+            trade_data = {
+                'whale_address': resolved_position.get('whale_address', ''),
+                'market_question': resolved_position.get('market_question', ''),
+                'market': resolved_position.get('market_question', ''),
+                'tier': resolved_position.get('tier', 'unknown'),
+                'side': resolved_position.get('side', ''),
+                'price': resolved_position.get('entry_price', 0)
+            }
+
+            self.log_trade(
+                trade_data,
+                position_size,
+                profit,
+                resolved_position.get('confidence', 0)
+            )
+
+            print(f"\n{'='*80}")
+            print(f"📊 LIVE POSITION RESOLVED")
+            print(f"{'='*80}")
+            print(f"   Position: {resolved_position.get('id', 'N/A')}")
+            print(f"   Market: {resolved_position.get('market_question', 'Unknown')[:50]}...")
+            print(f"   Our side: {resolved_position.get('side', '?')}")
+            print(f"   Market outcome: {resolved_position.get('market_outcome', '?')}")
+            print(f"   Outcome: {'✅ WIN' if is_win else '❌ LOSS'}")
+            print(f"   P&L: ${profit:+.2f}")
+            print(f"   New capital: ${self.current_capital:.2f}")
+            print(f"   ROI: {self.stats['roi_percent']:.1f}%")
+            print(f"{'='*80}\n")
+
+        except Exception as e:
+            print(f"   ⚠️ Error updating stats after resolution: {e}")
 
     async def update_whale_intelligence_loop(self):
         """Periodically update whale intelligence data"""
