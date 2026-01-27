@@ -185,12 +185,27 @@ class UltraFastDiscovery:
                 blocks_to_scan = current_block - from_block
                 print(f"\n⚡ Incremental scan: {blocks_to_scan} new blocks ({from_block} → {current_block})")
 
-                # Fetch new events
+                # Fetch new events (chunk if too many blocks to avoid RPC errors)
                 try:
-                    events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
-                        from_block=from_block,
-                        to_block=current_block
-                    )
+                    if blocks_to_scan > 2000:
+                        # Too many blocks - scan in chunks
+                        print(f"   Scanning in chunks (max 2000 blocks each)...")
+                        events = []
+                        chunk_start = from_block
+                        while chunk_start < current_block:
+                            chunk_end = min(chunk_start + 2000, current_block)
+                            chunk_events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
+                                from_block=chunk_start,
+                                to_block=chunk_end
+                            )
+                            events.extend(chunk_events)
+                            chunk_start = chunk_end + 1
+                            await asyncio.sleep(0.5)  # Rate limit
+                    else:
+                        events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
+                            from_block=from_block,
+                            to_block=current_block
+                        )
                 except Exception as e:
                     print(f"   ⚠️ Error fetching events: {e}")
                     await asyncio.sleep(10)
