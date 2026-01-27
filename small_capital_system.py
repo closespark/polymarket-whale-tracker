@@ -1425,13 +1425,30 @@ class SmallCapitalSystem:
 
             print(f"\n📊 MULTI-TIMEFRAME TIERS POPULATED:")
             total_whales = 0
+            whale_addresses = []
             for tier_name, tier in self.multi_tf_strategy.tiers.items():
                 print(f"   {tier.name}: {len(tier.whales)} whales")
                 total_whales += len(tier.whales)
+                # Collect addresses for pruning
+                for w in tier.whales:
+                    addr = w.get('address', '')
+                    if addr:
+                        whale_addresses.append(addr)
                 # Print first 3 addresses for debugging
                 for w in tier.whales[:3]:
                     print(f"      - {w.get('address', '')[:16]}...")
             print(f"   Total: {total_whales} unique whales for WebSocket monitoring")
+
+            # PRUNE NON-WHALE TRADES from database to save space
+            # This removes trades from addresses we don't care about
+            if whale_addresses:
+                stats_before = db.get_database_stats()
+                if stats_before['trade_count'] > 100000:  # Only prune if DB is large
+                    print(f"\n🧹 Pruning trades from non-whale addresses...")
+                    deleted = db.prune_non_whale_trades(whale_addresses)
+                    if deleted > 0:
+                        stats_after = db.get_database_stats()
+                        print(f"   Kept {stats_after['trade_count']:,} whale trades")
 
         except Exception as e:
             print(f"⚠️ Error populating tiers: {e}")

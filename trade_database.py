@@ -244,6 +244,91 @@ class TradeDatabase:
 
         return deleted
 
+    def prune_non_whale_trades(self, whale_addresses: List[str]) -> int:
+        """
+        Remove trades from addresses that are NOT in the whale list.
+
+        This is a major space saver - we only need trades from whales we're tracking.
+        Call this AFTER tier analysis to keep only relevant data.
+
+        Args:
+            whale_addresses: List of whale addresses to KEEP trades for
+
+        Returns:
+            Number of trades deleted
+        """
+        if not whale_addresses:
+            print("⚠️ No whale addresses provided - skipping prune")
+            return 0
+
+        # Normalize addresses to lowercase
+        whale_set = set(addr.lower() for addr in whale_addresses)
+
+        # Get current stats
+        before_stats = self.get_database_stats()
+        print(f"\n🧹 PRUNING NON-WHALE TRADES")
+        print(f"   Before: {before_stats['trade_count']:,} trades")
+        print(f"   Keeping trades for {len(whale_set):,} whale addresses")
+
+        # Build placeholders for SQL IN clause
+        # SQLite has a limit on variables, so we'll do this in batches if needed
+        if len(whale_set) > 500:
+            # For large whale lists, use a temp table approach
+            self.conn.execute("DROP TABLE IF EXISTS temp_whales")
+            self.conn.execute("CREATE TEMP TABLE temp_whales (address TEXT PRIMARY KEY)")
+
+            # Insert whale addresses in batches
+            batch_size = 500
+            whale_list = list(whale_set)
+            for i in range(0, len(whale_list), batch_size):
+                batch = whale_list[i:i+batch_size]
+                self.conn.executemany(
+                    "INSERT OR IGNORE INTO temp_whales (address) VALUES (?)",
+                    [(addr,) for addr in batch]
+                )
+            self.conn.commit()
+
+            # Delete trades where neither maker nor taker is a whale
+            cursor = self.conn.execute("""
+                DELETE FROM trades
+                WHERE LOWER(maker) NOT IN (SELECT address FROM temp_whales)
+                  AND LOWER(taker) NOT IN (SELECT address FROM temp_whales)
+            """)
+            deleted = cursor.rowcount
+
+            self.conn.execute("DROP TABLE IF EXISTS temp_whales")
+        else:
+            # For smaller lists, use IN clause directly
+            placeholders = ','.join('?' * len(whale_set))
+            whale_list = list(whale_set)
+
+            cursor = self.conn.execute(f"""
+                DELETE FROM trades
+                WHERE LOWER(maker) NOT IN ({placeholders})
+                  AND LOWER(taker) NOT IN ({placeholders})
+            """, whale_list + whale_list)
+            deleted = cursor.rowcount
+
+        self.conn.commit()
+
+        if deleted > 0:
+            print(f"   Deleted {deleted:,} non-whale trades")
+
+            # Vacuum to reclaim disk space
+            print(f"   Running VACUUM to reclaim disk space...")
+            self.conn.execute("VACUUM")
+
+            after_stats = self.get_database_stats()
+            print(f"   After: {after_stats['trade_count']:,} trades")
+
+            # Calculate space savings (rough estimate)
+            reduction_pct = (1 - after_stats['trade_count'] / before_stats['trade_count']) * 100 if before_stats['trade_count'] > 0 else 0
+            print(f"   Reduction: {reduction_pct:.1f}%")
+        else:
+            print(f"   No non-whale trades to prune")
+
+        return deleted
+
     def get_all_trades(self, min_block: int = None, max_block: int = None) -> List[Dict]:
         """
         Get all trades, optionally filtered by block range
