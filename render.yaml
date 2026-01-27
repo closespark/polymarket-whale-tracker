@@ -12,13 +12,13 @@ services:
     startCommand: python small_capital_system.py
     disk:
       name: whale-tracker-data
-      mountPath: /data
-      sizeGB: 5  # 5GB disk (~$1/month) - enough for trades.db (1.6GB)
+      mountPath: /var/data
+      sizeGB: 10  # 10GB disk - enough for trades.db (1.6GB) + growth
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
       - key: DB_PATH
-        value: "/data/trades.db"  # Use persistent disk for database
+        value: "/var/data/trades.db"  # Use persistent disk for database
       - key: POLYGON_RPC_URL
         sync: false  # Set manually in Render dashboard
       - key: POLYMARKET_API_KEY
