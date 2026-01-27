@@ -124,6 +124,12 @@ class WebSocketTradeMonitor:
 
         # Build subscription request for OrderFilled events
         # Note: This is provider-specific. Alchemy/Infura support eth_subscribe
+        # OrderFilled event signature hash (pre-computed for reliability)
+        # keccak256("OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)")
+        event_signature = "0x" + self.w3.keccak(
+            text="OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
+        ).hex()
+
         subscription_request = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -132,13 +138,13 @@ class WebSocketTradeMonitor:
                 "logs",
                 {
                     "address": self.ctf_address,
-                    "topics": [
-                        # OrderFilled event signature
-                        self.w3.keccak(text="OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)").hex()
-                    ]
+                    "topics": [event_signature]
                 }
             ]
         }
+
+        print(f"   Contract: {self.ctf_address}")
+        print(f"   Event sig: {event_signature[:20]}...")
 
         while self.running:
             try:
