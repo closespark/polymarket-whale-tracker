@@ -7,14 +7,229 @@ Enhancements:
 3. WebSocket real-time monitoring (sub-second detection)
 4. Enhanced risk management (trailing stops, limits)
 5. Incremental-only blockchain scanning
+6. Trade aggregation (filters arbitrage/hedging)
+7. Pending position tracking (profit counted on market resolution)
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
+import random
 
 from aiohttp import web
+
+# Timeframe durations for market resolution
+TIMEFRAME_DURATIONS = {
+    '15min': timedelta(minutes=15),
+    'hourly': timedelta(hours=1),
+    '4hour': timedelta(hours=4),
+    'daily': timedelta(days=1),
+    'unknown': timedelta(minutes=15)  # Default to 15min
+}
+
+
+class PendingPositionTracker:
+    """
+    Tracks pending positions until market resolution
+
+    Instead of claiming instant profit, we:
+    1. Record the position when we copy a trade
+    2. Track the expected resolution time based on market timeframe
+    3. Simulate/resolve the position when the market closes
+    4. Only then update capital and stats
+
+    In dry run mode: Simulates resolution based on whale's historical win rate
+    In live mode: Would check actual market resolution via Polymarket API
+    """
+
+    def __init__(self, system):
+        self.system = system
+        self.pending_positions = []  # List of pending position dicts
+        self.resolved_positions = []  # History of resolved positions
+
+    def add_position(self, trade_data: dict, position_size: float, confidence: float):
+        """
+        Add a new pending position
+
+        Args:
+            trade_data: Original trade data from whale detection
+            position_size: Our position size in USDC
+            confidence: Confidence score used for this trade
+        """
+        market_timeframe = trade_data.get('market_timeframe', '15min')
+        resolution_delay = TIMEFRAME_DURATIONS.get(market_timeframe, timedelta(minutes=15))
+
+        position = {
+            'id': f"{trade_data.get('whale_address', '')[:10]}_{datetime.now().timestamp()}",
+            'opened_at': datetime.now(),
+            'expected_resolution': datetime.now() + resolution_delay,
+            'market_timeframe': market_timeframe,
+            'position_size': position_size,
+            'confidence': confidence,
+            'whale_address': trade_data.get('whale_address', ''),
+            'whale_win_rate': trade_data.get('whale_win_rate', 0.72),
+            'side': trade_data.get('side', trade_data.get('net_side', 'BUY')),
+            'market': trade_data.get('market_question', trade_data.get('market', 'Unknown')),
+            'tier': trade_data.get('tier', 'unknown'),
+            'trade_data': trade_data,
+            'status': 'pending'
+        }
+
+        self.pending_positions.append(position)
+
+        print(f"\n📋 POSITION OPENED (pending resolution)")
+        print(f"   Size: ${position_size:.2f}")
+        print(f"   Market timeframe: {market_timeframe}")
+        print(f"   Expected resolution: {position['expected_resolution'].strftime('%H:%M:%S')}")
+        print(f"   ({len(self.pending_positions)} positions pending)")
+
+        return position
+
+    async def check_and_resolve_positions(self):
+        """
+        Check for positions that should be resolved
+
+        Called periodically to resolve expired positions
+        """
+        now = datetime.now()
+        positions_to_resolve = []
+
+        for pos in self.pending_positions:
+            if pos['expected_resolution'] <= now:
+                positions_to_resolve.append(pos)
+
+        for pos in positions_to_resolve:
+            await self._resolve_position(pos)
+
+    async def _resolve_position(self, position: dict):
+        """
+        Resolve a position (determine win/loss and update stats)
+
+        In dry run: Uses whale win rate to simulate outcome
+        In live: Would check actual market resolution
+        """
+        # Remove from pending
+        self.pending_positions = [p for p in self.pending_positions if p['id'] != position['id']]
+
+        # Determine outcome
+        # In dry run, simulate based on whale's historical win rate
+        whale_win_rate = position['whale_win_rate']
+        confidence = position['confidence']
+
+        # Adjust probability based on confidence (higher confidence = slightly better odds)
+        adjusted_win_prob = whale_win_rate * (0.9 + (confidence / 1000))  # Small confidence boost
+        adjusted_win_prob = min(adjusted_win_prob, 0.95)  # Cap at 95%
+
+        is_win = random.random() < adjusted_win_prob
+
+        # Calculate profit/loss
+        position_size = position['position_size']
+        if is_win:
+            # Win: profit based on confidence tier
+            if confidence > 95:
+                profit = position_size * 0.35
+            elif confidence > 92:
+                profit = position_size * 0.25
+            else:
+                profit = position_size * 0.15
+        else:
+            # Loss: lose the position
+            profit = -position_size
+
+        # Update position record
+        position['status'] = 'resolved'
+        position['resolved_at'] = datetime.now()
+        position['outcome'] = 'WIN' if is_win else 'LOSS'
+        position['profit'] = profit
+
+        self.resolved_positions.append(position)
+
+        # Update system stats
+        self._update_system_stats(position, profit, is_win)
+
+        # Print resolution
+        hold_time = (position['resolved_at'] - position['opened_at']).total_seconds() / 60
+        print(f"\n{'='*80}")
+        print(f"📊 POSITION RESOLVED ({position['market_timeframe']} market)")
+        print(f"{'='*80}")
+        print(f"   Whale: {position['whale_address'][:10]}...")
+        print(f"   Hold time: {hold_time:.1f} minutes")
+        print(f"   Position: ${position_size:.2f}")
+
+        if is_win:
+            print(f"   ✅ WIN: +${profit:.2f}")
+        else:
+            print(f"   ❌ LOSS: ${profit:.2f}")
+
+        print(f"   💰 New capital: ${self.system.current_capital:.2f}")
+        print(f"   📈 ROI: {self.system.stats['roi_percent']:.1f}%")
+        print(f"{'='*80}\n")
+
+        # Log the resolved trade
+        self.system.log_trade(
+            position['trade_data'],
+            position_size,
+            profit,
+            confidence
+        )
+
+    def _update_system_stats(self, position: dict, profit: float, is_win: bool):
+        """Update system stats after position resolution"""
+        system = self.system
+
+        system.stats['copies'] += 1
+        system.current_capital += profit
+        system.stats['total_profit'] += profit
+        system.stats['current_capital'] = system.current_capital
+
+        if is_win:
+            system.stats['wins'] += 1
+            system.stats['consecutive_wins'] += 1
+            system.stats['max_consecutive_wins'] = max(
+                system.stats['max_consecutive_wins'],
+                system.stats['consecutive_wins']
+            )
+            if profit > system.stats['best_trade']:
+                system.stats['best_trade'] = profit
+        else:
+            system.stats['losses'] += 1
+            system.stats['consecutive_wins'] = 0
+            if profit < system.stats['worst_trade']:
+                system.stats['worst_trade'] = profit
+
+        # Update ROI
+        system.stats['roi_percent'] = (
+            (system.current_capital - system.starting_capital) / system.starting_capital * 100
+        )
+
+        # Update risk manager and position sizer
+        system.risk_manager.update_capital(system.current_capital)
+        system.position_sizer.record_trade_result(profit, is_win)
+
+        # Record tier stats
+        tier = position.get('tier', 'unknown')
+        if hasattr(system, 'multi_tf_strategy'):
+            system.multi_tf_strategy.record_trade_result(tier, is_win, profit)
+
+    def get_pending_summary(self) -> dict:
+        """Get summary of pending positions"""
+        total_pending = sum(p['position_size'] for p in self.pending_positions)
+        by_timeframe = {}
+        for p in self.pending_positions:
+            tf = p['market_timeframe']
+            if tf not in by_timeframe:
+                by_timeframe[tf] = {'count': 0, 'total': 0}
+            by_timeframe[tf]['count'] += 1
+            by_timeframe[tf]['total'] += p['position_size']
+
+        return {
+            'pending_count': len(self.pending_positions),
+            'pending_total': total_pending,
+            'by_timeframe': by_timeframe,
+            'resolved_count': len(self.resolved_positions)
+        }
+
 
 from ultra_fast_discovery import UltraFastDiscovery
 from fifteen_minute_monitor import FifteenMinuteMonitor
@@ -443,6 +658,9 @@ class SmallCapitalSystem:
         # v2: Embedded dashboard for real-time monitoring
         self.dashboard = EmbeddedDashboard(self)
 
+        # v3: Pending position tracker (profit only on market resolution)
+        self.position_tracker = PendingPositionTracker(self)
+
         # Stats tracking
         self.stats = {
             'start_time': datetime.now(),
@@ -524,13 +742,19 @@ class SmallCapitalSystem:
             self.update_whale_intelligence_loop()
         )
 
+        # v3: Position resolution loop (checks pending positions every 30 seconds)
+        resolution_task = asyncio.create_task(
+            self.position_resolution_loop()
+        )
+
         try:
             await asyncio.gather(
                 discovery_task,
                 monitoring_task,
                 stats_task,
                 compound_task,
-                intel_task
+                intel_task,
+                resolution_task
             )
         except KeyboardInterrupt:
             print("\n⚠️  System stopped")
@@ -748,70 +972,28 @@ class SmallCapitalSystem:
         print(f"Confidence: {confidence:.1f}%")
         print(f"Position: ${position_size:.2f} ({position_size/self.current_capital*100:.1f}% of capital)")
         print(f"Current capital: ${self.current_capital:.2f}")
-        
+        print(f"Market timeframe: {trade_data.get('market_timeframe', '15min')}")
+
         # Execute (or simulate)
         if config.AUTO_COPY_ENABLED:
             result = await self.copier.copy_trade(trade_data, position_size)
-            profit = result.get('profit', 0)
+            # In live mode, position is tracked separately
+            # For now, still add to pending tracker
+            self.position_tracker.add_position(trade_data, position_size, confidence)
         else:
-            # Simulate
-            print(f"🔶 DRY RUN - Set AUTO_COPY_ENABLED=true to trade")
-            # Estimate profit (simplified)
-            if confidence > 95:
-                profit = position_size * 0.35  # 35% return
-            elif confidence > 92:
-                profit = position_size * 0.25
-            else:
-                profit = position_size * 0.15
-        
-        # Update stats
-        self.stats['copies'] += 1
-        self.current_capital += profit
-        self.stats['total_profit'] += profit
-        self.stats['current_capital'] = self.current_capital
-        
-        was_win = profit > 0
-        if was_win:
-            self.stats['wins'] += 1
-            self.stats['consecutive_wins'] += 1
-            self.stats['max_consecutive_wins'] = max(
-                self.stats['max_consecutive_wins'],
-                self.stats['consecutive_wins']
-            )
-            if profit > self.stats['best_trade']:
-                self.stats['best_trade'] = profit
-        else:
-            self.stats['losses'] += 1
-            self.stats['consecutive_wins'] = 0
-            if profit < self.stats['worst_trade']:
-                self.stats['worst_trade'] = profit
+            # DRY RUN MODE: Add to pending position tracker
+            # Profit will be calculated when market resolves (based on timeframe)
+            print(f"🔶 DRY RUN - Position will resolve when market closes")
+            self.position_tracker.add_position(trade_data, position_size, confidence)
 
-        # Update risk manager and position sizer
-        self.risk_manager.update_capital(self.current_capital)
-        self.position_sizer.record_trade_result(profit, was_win)
-
-        # v2: Record multi-timeframe tier stats
-        tier = trade_data.get('tier', 'unknown')
-        if hasattr(self, 'multi_tf_strategy'):
-            self.multi_tf_strategy.record_trade_result(tier, was_win, profit)
-
-        self.stats['roi_percent'] = (
-            (self.current_capital - self.starting_capital) / self.starting_capital * 100
-        )
-        
-        # Log
-        self.log_trade(trade_data, position_size, profit, confidence)
-        
-        # Print result
-        if profit > 0:
-            print(f"✅ WIN: +${profit:.2f}")
-        else:
-            print(f"❌ LOSS: ${profit:.2f}")
-        
-        print(f"💰 New capital: ${self.current_capital:.2f} ({self.stats['roi_percent']:.1f}% ROI)")
         print(f"{'='*80}\n")
-        
-        # Stop-loss check
+
+        # Stop-loss check (based on current + pending exposure)
+        pending = self.position_tracker.get_pending_summary()
+        total_exposure = pending['pending_total']
+        if total_exposure > self.current_capital * 0.60:
+            print(f"⚠️ High exposure: ${total_exposure:.2f} pending ({total_exposure/self.current_capital*100:.0f}% of capital)")
+
         if self.current_capital < self.starting_capital * 0.70:
             print("\n" + "="*80)
             print("🛑 STOP-LOSS TRIGGERED")
@@ -897,12 +1079,16 @@ class SmallCapitalSystem:
 
             uptime_hours = (datetime.now() - self.stats['start_time']).total_seconds() / 3600
 
+            # Get pending position info
+            pending = self.position_tracker.get_pending_summary()
+
             print("\n" + "-"*80)
             print(f"📊 $100 CAPITAL STATS - {datetime.now().strftime('%H:%M:%S')}")
             print("-"*80)
             print(f"💰 Starting: ${self.starting_capital}  →  Current: ${self.current_capital:.2f}")
-            print(f"📈 ROI: {self.stats['roi_percent']:.1f}%  |  Profit: ${self.stats['total_profit']:.2f}")
-            print(f"📊 Trades: {self.stats['copies']}  |  Wins: {self.stats['wins']}  |  Losses: {self.stats['losses']}")
+            print(f"📈 ROI: {self.stats['roi_percent']:.1f}%  |  Realized profit: ${self.stats['total_profit']:.2f}")
+            print(f"⏳ Pending: {pending['pending_count']} positions (${pending['pending_total']:.2f})")
+            print(f"📊 Resolved: {self.stats['copies']}  |  Wins: {self.stats['wins']}  |  Losses: {self.stats['losses']}")
 
             if self.stats['copies'] > 0:
                 win_rate = self.stats['wins'] / self.stats['copies'] * 100
@@ -1204,6 +1390,23 @@ class SmallCapitalSystem:
             print(self.analytics.get_daily_summary())
             print(self.analytics.get_market_report())
             print("="*80 + "\n")
+
+    async def position_resolution_loop(self):
+        """Check and resolve pending positions every 30 seconds"""
+        while True:
+            await asyncio.sleep(30)
+
+            try:
+                # Check for positions to resolve
+                await self.position_tracker.check_and_resolve_positions()
+
+                # Print pending summary every 5 minutes worth of checks
+                pending = self.position_tracker.get_pending_summary()
+                if pending['pending_count'] > 0:
+                    print(f"\n⏳ Pending positions: {pending['pending_count']} (${pending['pending_total']:.2f})")
+
+            except Exception as e:
+                print(f"   ⚠️ Position resolution error: {e}")
 
     async def update_whale_intelligence_loop(self):
         """Periodically update whale intelligence data"""

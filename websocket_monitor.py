@@ -371,7 +371,12 @@ class HybridMonitor:
     """
     Hybrid approach: WebSocket + Polling backup
 
-    Uses WebSocket for speed, with polling as reliability backup
+    Uses WebSocket for speed, with polling as reliability backup.
+
+    v2: Adds trade aggregation to filter out arbitrage/hedging:
+    - Batches trades by whale+block
+    - Only forwards NET directional trades (not BUY+SELL on same block)
+    - Filters out dust trades (< $5)
     """
 
     def __init__(self, whale_addresses: List[str]):
@@ -379,21 +384,144 @@ class HybridMonitor:
         self.seen_txs = set()  # Deduplicate
         self.callback = None
 
+        # v2: Trade aggregation buffer
+        # Key: (whale_address, block_number)
+        # Value: list of trades
+        self.trade_buffer = {}
+        self.buffer_timeout = 3.0  # Wait 3 seconds to aggregate trades on same block
+        self.min_trade_amount = 5.0  # Minimum $5 to consider (filter dust)
+
     async def start(self, callback: Callable):
         """Start both monitoring methods"""
         self.callback = callback
 
-        async def dedupe_callback(trade_data):
+        # Start buffer processor
+        asyncio.create_task(self._process_buffer_loop())
+
+        async def aggregating_callback(trade_data):
+            """Buffer trades for aggregation before forwarding"""
             tx_hash = trade_data.get('tx_hash', '')
-            if tx_hash not in self.seen_txs:
-                self.seen_txs.add(tx_hash)
-                # Keep set size manageable
-                if len(self.seen_txs) > 10000:
-                    self.seen_txs = set(list(self.seen_txs)[-5000:])
+            if tx_hash in self.seen_txs:
+                return  # Already seen
 
-                await callback(trade_data)
+            self.seen_txs.add(tx_hash)
+            # Keep set size manageable
+            if len(self.seen_txs) > 10000:
+                self.seen_txs = set(list(self.seen_txs)[-5000:])
 
-        await self.ws_monitor.start(dedupe_callback)
+            # Add to buffer
+            whale = trade_data.get('whale_address', '').lower()
+            block = trade_data.get('block_number', 0)
+            key = (whale, block)
+
+            if key not in self.trade_buffer:
+                self.trade_buffer[key] = {
+                    'trades': [],
+                    'first_seen': datetime.now(),
+                    'whale_address': trade_data.get('whale_address', ''),
+                    'block_number': block
+                }
+
+            self.trade_buffer[key]['trades'].append(trade_data)
+
+        await self.ws_monitor.start(aggregating_callback)
+
+    async def _process_buffer_loop(self):
+        """Process buffered trades after timeout"""
+        while True:
+            await asyncio.sleep(1.0)  # Check every second
+
+            now = datetime.now()
+            keys_to_process = []
+
+            # Find buffers that have timed out
+            for key, buffer in self.trade_buffer.items():
+                age = (now - buffer['first_seen']).total_seconds()
+                if age >= self.buffer_timeout:
+                    keys_to_process.append(key)
+
+            # Process each timed-out buffer
+            for key in keys_to_process:
+                buffer = self.trade_buffer.pop(key, None)
+                if buffer and self.callback:
+                    await self._aggregate_and_forward(buffer)
+
+    async def _aggregate_and_forward(self, buffer: dict):
+        """
+        Aggregate trades and forward only if directional
+
+        Filters out:
+        - Arbitrage (BUY+SELL on same block)
+        - Dust trades (< $5)
+        - Net-zero positions
+        """
+        trades = buffer['trades']
+        whale = buffer['whale_address']
+        block = buffer['block_number']
+
+        if not trades:
+            return
+
+        # Calculate net position
+        total_buy = 0.0
+        total_sell = 0.0
+        buy_trades = []
+        sell_trades = []
+
+        for t in trades:
+            usdc_value = t.get('usdc_value', t.get('taker_amount', 0) / 1e6)
+            side = t.get('side', 'BUY')
+
+            if side == 'BUY':
+                total_buy += usdc_value
+                buy_trades.append(t)
+            else:
+                total_sell += usdc_value
+                sell_trades.append(t)
+
+        net_amount = total_buy - total_sell
+
+        # Check if this looks like arbitrage/hedging
+        if total_buy > 0 and total_sell > 0:
+            # Has both buy and sell on same block
+            ratio = min(total_buy, total_sell) / max(total_buy, total_sell)
+            if ratio > 0.5:  # More than 50% offset = likely arbitrage
+                print(f"\n⚠️ FILTERED: Arbitrage detected for {whale[:10]}...")
+                print(f"   Block {block}: BUY ${total_buy:.2f}, SELL ${total_sell:.2f}")
+                print(f"   Offset ratio: {ratio*100:.0f}% - skipping")
+                return
+
+        # Determine net direction
+        if abs(net_amount) < self.min_trade_amount:
+            print(f"\n⚠️ FILTERED: Dust trade for {whale[:10]}...")
+            print(f"   Net amount: ${abs(net_amount):.2f} (below ${self.min_trade_amount} minimum)")
+            return
+
+        # Use the largest trade in the net direction as the representative
+        if net_amount > 0:
+            # Net BUY
+            representative = max(buy_trades, key=lambda t: t.get('usdc_value', 0))
+            net_side = 'BUY'
+        else:
+            # Net SELL
+            representative = max(sell_trades, key=lambda t: t.get('usdc_value', 0))
+            net_side = 'SELL'
+
+        # Enrich with aggregation info
+        representative['aggregated'] = True
+        representative['net_side'] = net_side
+        representative['net_amount'] = abs(net_amount)
+        representative['total_buy'] = total_buy
+        representative['total_sell'] = total_sell
+        representative['trade_count_in_block'] = len(trades)
+
+        print(f"\n✅ AGGREGATED: {whale[:10]}... Block {block}")
+        print(f"   Net direction: {net_side} ${abs(net_amount):.2f}")
+        if len(trades) > 1:
+            print(f"   ({len(trades)} trades aggregated: BUY ${total_buy:.2f}, SELL ${total_sell:.2f})")
+
+        # Forward to callback
+        await self.callback(representative)
 
     def update_whales(self, addresses: List[str]):
         """Update whale list"""
