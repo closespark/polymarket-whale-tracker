@@ -161,20 +161,39 @@ class SmallCapitalSystem:
             print("\n⚠️  System stopped")
             self.print_final_summary()
     
+    def _get_all_tier_addresses(self) -> list:
+        """Get all whale addresses from all tiers"""
+        addresses = set()
+        for tier in self.multi_tf_strategy.tiers.values():
+            for whale in tier.whales:
+                addr = whale.get('address', '')
+                if addr:
+                    addresses.add(addr.lower())
+        return list(addresses)
+
     async def run_monitoring(self):
         """Monitor with WebSocket for sub-second detection"""
 
         while True:
             try:
-                # Get current whales
-                whale_addresses = self.discovery.get_monitoring_addresses()
+                # Get whales from tiers (these are the ones we'll look up)
+                # This ensures WebSocket monitors the same addresses that are in tiers
+                tier_addresses = self._get_all_tier_addresses()
+
+                # Fall back to discovery pool if tiers are empty
+                if tier_addresses:
+                    whale_addresses = tier_addresses
+                    print(f"\n🔌 Using {len(whale_addresses)} addresses from tiers")
+                else:
+                    whale_addresses = self.discovery.get_monitoring_addresses()
+                    print(f"\n🔌 Using {len(whale_addresses)} addresses from discovery pool")
 
                 if not whale_addresses:
                     await asyncio.sleep(60)
                     continue
 
                 # v2: Use WebSocket monitor for faster detection
-                print(f"\n🔌 Starting WebSocket monitor for {len(whale_addresses)} whales")
+                print(f"🔌 Starting WebSocket monitor for {len(whale_addresses)} whales")
 
                 self.ws_monitor = HybridMonitor(whale_addresses)
 
@@ -749,8 +768,14 @@ class SmallCapitalSystem:
             self.multi_tf_strategy.populate_from_any_source(specialists, db=db)
 
             print(f"\n📊 MULTI-TIMEFRAME TIERS POPULATED:")
+            total_whales = 0
             for tier_name, tier in self.multi_tf_strategy.tiers.items():
                 print(f"   {tier.name}: {len(tier.whales)} whales")
+                total_whales += len(tier.whales)
+                # Print first 3 addresses for debugging
+                for w in tier.whales[:3]:
+                    print(f"      - {w.get('address', '')[:16]}...")
+            print(f"   Total: {total_whales} unique whales for WebSocket monitoring")
 
         except Exception as e:
             print(f"⚠️ Error populating tiers: {e}")
