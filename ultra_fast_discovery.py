@@ -186,38 +186,47 @@ class UltraFastDiscovery:
                 print(f"\n⚡ Incremental scan: {blocks_to_scan} new blocks ({from_block} → {current_block})")
 
                 # Fetch new events (chunk if too many blocks to avoid RPC errors)
+                # Memory-optimized: process each chunk immediately, don't accumulate
                 try:
+                    total_added = 0
                     if blocks_to_scan > 2000:
-                        # Too many blocks - scan in chunks
-                        print(f"   Scanning in chunks (max 2000 blocks each)...")
-                        events = []
+                        # Too many blocks - scan in smaller chunks to avoid OOM
+                        chunk_size = 1000  # Reduced from 2000
+                        print(f"   Scanning in chunks (max {chunk_size} blocks each)...")
                         chunk_start = from_block
                         while chunk_start < current_block:
-                            chunk_end = min(chunk_start + 2000, current_block)
-                            chunk_events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
-                                from_block=chunk_start,
-                                to_block=chunk_end
-                            )
-                            events.extend(chunk_events)
+                            chunk_end = min(chunk_start + chunk_size, current_block)
+                            try:
+                                chunk_events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
+                                    from_block=chunk_start,
+                                    to_block=chunk_end
+                                )
+                                # Process immediately, don't accumulate
+                                if chunk_events:
+                                    added = self.db.add_trades_from_events(chunk_events)
+                                    total_added += added
+                                    await self.check_whale_activity(chunk_events)
+                                    del chunk_events  # Free memory immediately
+                            except Exception as chunk_err:
+                                print(f"   ⚠️ Chunk error: {chunk_err}")
                             chunk_start = chunk_end + 1
-                            await asyncio.sleep(0.5)  # Rate limit
+                            await asyncio.sleep(0.3)  # Rate limit
+                        if total_added > 0:
+                            print(f"   📥 Stored {total_added} new trades (chunked)")
                     else:
                         events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
                             from_block=from_block,
                             to_block=current_block
                         )
+                        if events:
+                            total_added = self.db.add_trades_from_events(events)
+                            print(f"   📥 Stored {total_added} new trades")
+                            await self.check_whale_activity(events)
+                            del events  # Free memory
                 except Exception as e:
                     print(f"   ⚠️ Error fetching events: {e}")
                     await asyncio.sleep(10)
                     continue
-
-                if events:
-                    # Store to database
-                    added = self.db.add_trades_from_events(events)
-                    print(f"   📥 Stored {added} new trades")
-
-                    # Quick check for whale activity
-                    await self.check_whale_activity(events)
 
                 # Update last scanned block
                 self.db.set_last_scanned_block(current_block)
