@@ -1410,6 +1410,9 @@ class SmallCapitalSystem:
         Populate multi-timeframe tiers from database analysis
 
         Database is the single source of truth - no fallbacks
+
+        IMPORTANT: This method BLOCKS until complete. No other operations
+        (monitoring, discovery, etc.) will start until this finishes.
         """
         try:
             # Get database from discovery
@@ -1441,14 +1444,23 @@ class SmallCapitalSystem:
 
             # PRUNE NON-WHALE TRADES from database to save space
             # This removes trades from addresses we don't care about
+            # BLOCKING: All other operations are paused until pruning completes
             if whale_addresses:
                 stats_before = db.get_database_stats()
-                if stats_before['trade_count'] > 100000:  # Only prune if DB is large
-                    print(f"\n🧹 Pruning trades from non-whale addresses...")
-                    deleted = db.prune_non_whale_trades(whale_addresses)
-                    if deleted > 0:
-                        stats_after = db.get_database_stats()
-                        print(f"   Kept {stats_after['trade_count']:,} whale trades")
+                trade_count = stats_before['trade_count']
+
+                # Always attempt prune - let the database method decide if needed
+                print(f"\n🛑 SYSTEM PAUSED FOR DATABASE MAINTENANCE")
+                print(f"   All monitoring and discovery tasks will wait...")
+                print(f"   Current trade count: {trade_count:,}")
+
+                deleted = db.prune_non_whale_trades(whale_addresses)
+
+                if deleted > 0:
+                    stats_after = db.get_database_stats()
+                    print(f"   Kept {stats_after['trade_count']:,} whale trades")
+
+                print(f"✅ DATABASE MAINTENANCE COMPLETE - Resuming operations\n")
 
         except Exception as e:
             print(f"⚠️ Error populating tiers: {e}")

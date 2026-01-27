@@ -251,6 +251,9 @@ class TradeDatabase:
         This is a major space saver - we only need trades from whales we're tracking.
         Call this AFTER tier analysis to keep only relevant data.
 
+        BLOCKING: This operation locks the database until complete.
+        No reads or writes should happen during pruning.
+
         Args:
             whale_addresses: List of whale addresses to KEEP trades for
 
@@ -266,14 +269,25 @@ class TradeDatabase:
 
         # Get current stats
         before_stats = self.get_database_stats()
-        print(f"\n🧹 PRUNING NON-WHALE TRADES")
-        print(f"   Before: {before_stats['trade_count']:,} trades")
+        trade_count = before_stats['trade_count']
+
+        # Skip if database is small (< 1000 trades) - not worth the overhead
+        if trade_count < 1000:
+            print(f"   Database small ({trade_count:,} trades) - skipping prune")
+            return 0
+
+        print(f"\n🧹 PRUNING NON-WHALE TRADES (BLOCKING)")
+        print(f"   ⏸️  All other database operations paused...")
+        print(f"   Before: {trade_count:,} trades")
         print(f"   Keeping trades for {len(whale_set):,} whale addresses")
+
+        prune_start = time.time()
 
         # Build placeholders for SQL IN clause
         # SQLite has a limit on variables, so we'll do this in batches if needed
         if len(whale_set) > 500:
             # For large whale lists, use a temp table approach
+            print(f"   [1/4] Creating temp whale lookup table...")
             self.conn.execute("DROP TABLE IF EXISTS temp_whales")
             self.conn.execute("CREATE TEMP TABLE temp_whales (address TEXT PRIMARY KEY)")
 
@@ -286,46 +300,68 @@ class TradeDatabase:
                     "INSERT OR IGNORE INTO temp_whales (address) VALUES (?)",
                     [(addr,) for addr in batch]
                 )
+                print(f"   [1/4] Loaded {min(i+batch_size, len(whale_list)):,}/{len(whale_list):,} whale addresses...")
             self.conn.commit()
+            print(f"   [1/4] Temp table created ({time.time() - prune_start:.1f}s)")
 
             # Delete trades where neither maker nor taker is a whale
+            print(f"   [2/4] Deleting non-whale trades (this may take a while)...")
+            delete_start = time.time()
             cursor = self.conn.execute("""
                 DELETE FROM trades
                 WHERE LOWER(maker) NOT IN (SELECT address FROM temp_whales)
                   AND LOWER(taker) NOT IN (SELECT address FROM temp_whales)
             """)
             deleted = cursor.rowcount
+            print(f"   [2/4] Delete complete: {deleted:,} trades removed ({time.time() - delete_start:.1f}s)")
 
             self.conn.execute("DROP TABLE IF EXISTS temp_whales")
         else:
             # For smaller lists, use IN clause directly
+            print(f"   [1/4] Using direct IN clause (small whale list)...")
             placeholders = ','.join('?' * len(whale_set))
             whale_list = list(whale_set)
 
+            print(f"   [2/4] Deleting non-whale trades...")
+            delete_start = time.time()
             cursor = self.conn.execute(f"""
                 DELETE FROM trades
                 WHERE LOWER(maker) NOT IN ({placeholders})
                   AND LOWER(taker) NOT IN ({placeholders})
             """, whale_list + whale_list)
             deleted = cursor.rowcount
+            print(f"   [2/4] Delete complete: {deleted:,} trades removed ({time.time() - delete_start:.1f}s)")
 
+        print(f"   [3/4] Committing changes...")
+        commit_start = time.time()
         self.conn.commit()
+        print(f"   [3/4] Commit complete ({time.time() - commit_start:.1f}s)")
 
         if deleted > 0:
-            print(f"   Deleted {deleted:,} non-whale trades")
-
             # Vacuum to reclaim disk space
-            print(f"   Running VACUUM to reclaim disk space...")
+            print(f"   [4/4] Running VACUUM to reclaim disk space (this may take a while)...")
+            vacuum_start = time.time()
             self.conn.execute("VACUUM")
+            print(f"   [4/4] VACUUM complete ({time.time() - vacuum_start:.1f}s)")
 
             after_stats = self.get_database_stats()
-            print(f"   After: {after_stats['trade_count']:,} trades")
+            total_time = time.time() - prune_start
 
-            # Calculate space savings (rough estimate)
-            reduction_pct = (1 - after_stats['trade_count'] / before_stats['trade_count']) * 100 if before_stats['trade_count'] > 0 else 0
+            print(f"\n   📊 PRUNE SUMMARY:")
+            print(f"   Before: {trade_count:,} trades")
+            print(f"   After:  {after_stats['trade_count']:,} trades")
+            print(f"   Deleted: {deleted:,} non-whale trades")
+
+            # Calculate space savings
+            reduction_pct = (1 - after_stats['trade_count'] / trade_count) * 100 if trade_count > 0 else 0
             print(f"   Reduction: {reduction_pct:.1f}%")
+            print(f"   Total time: {total_time:.1f}s")
+            print(f"   ✅ Prune complete - database operations resuming")
         else:
+            print(f"   [4/4] No VACUUM needed")
             print(f"   No non-whale trades to prune")
+            print(f"   Total time: {time.time() - prune_start:.1f}s")
+            print(f"   ✅ Database already optimized - operations resuming")
 
         return deleted
 
