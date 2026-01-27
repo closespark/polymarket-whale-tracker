@@ -1478,8 +1478,12 @@ class SmallCapitalSystem:
             print(f"   Total: {total_whales} unique whales for WebSocket monitoring")
 
             # Prune non-whale trades to keep database manageable
-            # Only prune if we have a meaningful whale list (avoid the 100-whale cache bug)
-            if total_whales >= 500:
+            # Controlled by PRUNE_ON_STARTUP env var (default: false)
+            prune_enabled = os.environ.get('PRUNE_ON_STARTUP', 'false').lower() == 'true'
+
+            if not prune_enabled:
+                print(f"   Pruning disabled (PRUNE_ON_STARTUP=false)")
+            elif total_whales >= 500:
                 stats_before = db.get_database_stats()
                 print(f"\n🗑️  Pruning non-whale trades...")
                 print(f"   Database has {stats_before['trade_count']:,} trades before prune")

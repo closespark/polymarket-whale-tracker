@@ -85,7 +85,7 @@ class MultiTimeframeStrategy:
                 base_threshold=88.0,
                 position_multiplier=1.2,
                 min_win_rate=0.70,  # Lowered for more coverage (confidence still filters)
-                max_whales=1000  # No practical limit
+                max_whales=None  # Unlimited
             ),
             'hourly': WhaleTimeframeTier(
                 name='Tier 2: Hourly Specialists',
@@ -93,7 +93,7 @@ class MultiTimeframeStrategy:
                 base_threshold=90.0,
                 position_multiplier=1.0,
                 min_win_rate=0.68,
-                max_whales=1000  # No practical limit
+                max_whales=None  # Unlimited
             ),
             '4hour': WhaleTimeframeTier(
                 name='Tier 3: 4-Hour Specialists',
@@ -101,7 +101,7 @@ class MultiTimeframeStrategy:
                 base_threshold=92.0,
                 position_multiplier=0.8,
                 min_win_rate=0.65,
-                max_whales=1000  # No practical limit
+                max_whales=None  # Unlimited
             ),
             'daily': WhaleTimeframeTier(
                 name='Tier 4: Daily Specialists',
@@ -109,7 +109,7 @@ class MultiTimeframeStrategy:
                 base_threshold=93.0,
                 position_multiplier=0.7,
                 min_win_rate=0.65,
-                max_whales=1000  # No practical limit
+                max_whales=None  # Unlimited
             )
         }
 
@@ -127,34 +127,109 @@ class MultiTimeframeStrategy:
 
     def detect_market_timeframe(self, market_name: str) -> str:
         """
-        Detect the timeframe of a market from its name
+        Detect the timeframe of a market from its name by parsing end time.
+
+        Uses current time (ET) to determine timeframe bucket:
+        - 15min: ends within 15 minutes
+        - hourly: ends within 1 hour
+        - 4hour: ends within 4 hours
+        - daily: ends within 24 hours
 
         Examples:
-        - "BTC Up in Next 15 Minutes" → "15min"
-        - "ETH Above $3500 in 1 Hour" → "hourly"
-        - "SOL Up in Next 4 Hours" → "4hour"
-        - "BTC Above $100k by Friday" → "daily"
+        - "Bitcoin Up or Down - January 27, 6PM ET" → parse end time, compare to now
+        - "Ethereum Up or Down on January 28?" → daily (tomorrow)
+        - "BTC Up in Next 15 Minutes" → 15min (legacy pattern)
         """
         market_lower = market_name.lower()
 
-        # 15-minute patterns
+        # First check legacy patterns (explicit timeframe in name)
         if any(p in market_lower for p in ['15 min', '15min', 'next 15', '15-min']):
             return '15min'
 
-        # Hourly patterns (1 hour, but not 4 hour)
-        if any(p in market_lower for p in ['1 hour', '1hour', 'next hour', 'in an hour', '60 min']):
-            return 'hourly'
-
-        # 4-hour patterns
         if any(p in market_lower for p in ['4 hour', '4hour', '4-hour', 'next 4']):
             return '4hour'
 
-        # Daily patterns
-        if any(p in market_lower for p in ['daily', 'by friday', 'by monday', 'by tomorrow',
-                                            'end of day', 'eod', '24 hour', 'today']):
-            return 'daily'
+        # Try to parse date/time from market name
+        # Patterns like "January 27, 6PM ET" or "January 28?"
+        from datetime import datetime
+        import pytz
 
-        # Check for hour patterns (e.g., "2 hours", "6 hours")
+        try:
+            et_tz = pytz.timezone('US/Eastern')
+            now_et = datetime.now(et_tz)
+
+            # Pattern: "Month Day, TimeAM/PM ET" (e.g., "January 27, 6PM ET")
+            time_match = re.search(
+                r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),?\s*(\d{1,2})(am|pm)\s*et',
+                market_lower
+            )
+
+            if time_match:
+                month_name = time_match.group(1)
+                day = int(time_match.group(2))
+                hour = int(time_match.group(3))
+                ampm = time_match.group(4)
+
+                # Convert to 24-hour
+                if ampm == 'pm' and hour != 12:
+                    hour += 12
+                elif ampm == 'am' and hour == 12:
+                    hour = 0
+
+                # Build end datetime
+                month_num = ['january', 'february', 'march', 'april', 'may', 'june',
+                            'july', 'august', 'september', 'october', 'november', 'december'].index(month_name) + 1
+
+                end_time = et_tz.localize(datetime(now_et.year, month_num, day, hour, 0, 0))
+
+                # If end_time is in the past, it might be next year
+                if end_time < now_et:
+                    end_time = et_tz.localize(datetime(now_et.year + 1, month_num, day, hour, 0, 0))
+
+                # Calculate time until end
+                time_until_end = (end_time - now_et).total_seconds() / 3600  # hours
+
+                if time_until_end <= 0.25:  # 15 minutes
+                    return '15min'
+                elif time_until_end <= 1:
+                    return 'hourly'
+                elif time_until_end <= 4:
+                    return '4hour'
+                elif time_until_end <= 24:
+                    return 'daily'
+                else:
+                    return 'unknown'  # More than 24 hours out
+
+            # Pattern: "on Month Day?" (e.g., "on January 28?") - daily markets
+            date_match = re.search(
+                r'on\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})',
+                market_lower
+            )
+
+            if date_match:
+                month_name = date_match.group(1)
+                day = int(date_match.group(2))
+                month_num = ['january', 'february', 'march', 'april', 'may', 'june',
+                            'july', 'august', 'september', 'october', 'november', 'december'].index(month_name) + 1
+
+                # Assume end of day (11:59 PM ET)
+                end_time = et_tz.localize(datetime(now_et.year, month_num, day, 23, 59, 0))
+
+                if end_time < now_et:
+                    end_time = et_tz.localize(datetime(now_et.year + 1, month_num, day, 23, 59, 0))
+
+                time_until_end = (end_time - now_et).total_seconds() / 3600
+
+                if time_until_end <= 24:
+                    return 'daily'
+                else:
+                    return 'unknown'
+
+        except Exception as e:
+            # If parsing fails, fall back to pattern matching
+            pass
+
+        # Legacy hour patterns (e.g., "2 hours", "6 hours")
         hour_match = re.search(r'(\d+)\s*hour', market_lower)
         if hour_match:
             hours = int(hour_match.group(1))
@@ -165,8 +240,8 @@ class MultiTimeframeStrategy:
             else:
                 return 'daily'
 
-        # Default to 15min if unclear (most common for crypto)
-        return '15min'
+        # Unknown timeframe - don't process
+        return 'unknown'
 
     def find_whale_tier(self, whale_address: str) -> Tuple[Optional[str], Optional[WhaleTimeframeTier]]:
         """Find which tier a whale belongs to"""
@@ -199,6 +274,18 @@ class MultiTimeframeStrategy:
         # Detect market timeframe
         market = trade_data.get('market', trade_data.get('market_question', ''))
         market_timeframe = self.detect_market_timeframe(market)
+
+        # Filter out unknown timeframes (weekly, monthly, pre-market, etc.)
+        if market_timeframe == 'unknown':
+            return {
+                'should_copy': False,
+                'threshold': 100.0,
+                'position_multiplier': 0.0,
+                'tier': 'unknown',
+                'market_timeframe': 'unknown',
+                'is_specialty': False,
+                'reason': f'Market not in supported timeframes (15min/hourly/4hour/daily): {market[:50]}...'
+            }
 
         # Find whale's tier
         whale_tier_name, whale_tier = self.find_whale_tier(whale_address)

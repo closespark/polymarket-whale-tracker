@@ -563,17 +563,23 @@ class TradeDatabase:
                 s['total_volume'], s['estimated_profit'], s['win_rate'],
                 s['first_block'], s['last_block']
             )
-            for s in specialists[:1000]  # Cache top 1000
+            for s in specialists  # Cache all qualified whales
         ])
         self.conn.commit()
 
-    def get_top_whales(self, limit: int = 25) -> List[Dict]:
+    def get_top_whales(self, limit: int = None) -> List[Dict]:
         """Get top whales from cache (instant, no analysis needed)"""
-        cursor = self.conn.execute("""
-            SELECT * FROM whale_stats
-            ORDER BY estimated_profit DESC
-            LIMIT ?
-        """, (limit,))
+        if limit is None:
+            cursor = self.conn.execute("""
+                SELECT * FROM whale_stats
+                ORDER BY estimated_profit DESC
+            """)
+        else:
+            cursor = self.conn.execute("""
+                SELECT * FROM whale_stats
+                ORDER BY estimated_profit DESC
+                LIMIT ?
+            """, (limit,))
         return [dict(row) for row in cursor.fetchall()]
 
     def get_database_stats(self) -> Dict:
@@ -601,7 +607,7 @@ class TradeDatabase:
         """Export whale stats to CSV"""
         import csv
 
-        whales = self.get_top_whales(limit=1000)
+        whales = self.get_top_whales(limit=None)  # Export all whales
         if not whales:
             print("No whale data to export")
             return

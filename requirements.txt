@@ -26,6 +26,7 @@ anthropic>=0.18.1
 python-dotenv>=1.0.0
 colorama>=0.4.6
 tqdm>=4.66.1
+pytz>=2024.1
 
 # Web Dashboard
 flask>=3.0.0
