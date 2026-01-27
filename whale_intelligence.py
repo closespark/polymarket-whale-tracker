@@ -44,13 +44,30 @@ class WhaleCorrelationTracker:
         # Cleanup old trades
         self._cleanup_old_trades(market_id)
 
-    def _cleanup_old_trades(self, market_id: str):
-        """Remove trades older than window"""
+    def _cleanup_old_trades(self, market_id: str = None):
+        """Remove trades older than window
+
+        Args:
+            market_id: Specific market to clean, or None to clean all markets
+        """
         cutoff = datetime.now() - timedelta(minutes=self.trade_window_minutes)
-        self.recent_trades[market_id] = [
-            t for t in self.recent_trades[market_id]
-            if t['time'] > cutoff
-        ]
+
+        if market_id is not None:
+            # Clean specific market
+            self.recent_trades[market_id] = [
+                t for t in self.recent_trades[market_id]
+                if t['time'] > cutoff
+            ]
+        else:
+            # Clean all markets
+            for mid in list(self.recent_trades.keys()):
+                self.recent_trades[mid] = [
+                    t for t in self.recent_trades[mid]
+                    if t['time'] > cutoff
+                ]
+                # Remove empty markets to save memory
+                if not self.recent_trades[mid]:
+                    del self.recent_trades[mid]
 
     def check_whale_consensus(self, market_id: str, monitored_whales: set) -> Dict:
         """

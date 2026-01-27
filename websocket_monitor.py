@@ -147,18 +147,21 @@ class WebSocketTradeMonitor:
         print(f"   Event sig: {event_signature[:20]}...")
 
         reconnect_count = 0
-        while self.running:
+        max_reconnects = 100  # Allow many reconnects before giving up
+
+        while self.running and reconnect_count < max_reconnects:
             try:
                 reconnect_count += 1
                 if reconnect_count > 1:
-                    print(f"🔄 WebSocket reconnecting (attempt {reconnect_count})...")
+                    print(f"🔄 WebSocket reconnecting (attempt {reconnect_count}/{max_reconnects})...")
 
                 async with websockets.connect(
                     self.ws_url,
-                    open_timeout=30,
+                    open_timeout=60,       # Increased from 30
                     close_timeout=10,
-                    ping_interval=20,
-                    ping_timeout=20
+                    ping_interval=30,      # Increased from 20 (less aggressive)
+                    ping_timeout=30,       # Match ping_interval
+                    max_size=10 * 1024 * 1024  # 10MB max message size
                 ) as ws:
                     # Subscribe
                     await ws.send(json.dumps(subscription_request))
@@ -167,8 +170,15 @@ class WebSocketTradeMonitor:
 
                     if 'result' in sub_response:
                         print(f"✅ Subscribed to events (ID: {sub_response['result'][:16]}...)")
+                        reconnect_count = 0  # Reset on successful connection
+                    elif 'error' in sub_response:
+                        error = sub_response['error']
+                        print(f"❌ Subscription failed: {error.get('message', error)}")
+                        print(f"   Falling back to polling mode...")
+                        await self._run_polling_monitor()
+                        return
                     else:
-                        print(f"⚠️ Subscription response: {sub_response}")
+                        print(f"⚠️ Unexpected subscription response: {sub_response}")
 
                     # Listen for events
                     heartbeat_count = 0
@@ -181,15 +191,10 @@ class WebSocketTradeMonitor:
                                 await self._process_log_event(data['params']['result'])
 
                         except asyncio.TimeoutError:
-                            # Send ping to keep connection alive
+                            # No message received in 30s - this is normal, just heartbeat
                             heartbeat_count += 1
-                            try:
-                                await ws.ping()
-                                if heartbeat_count % 4 == 0:  # Every 2 minutes
-                                    print(f"   💓 WebSocket alive ({heartbeat_count * 30}s, {self.events_received} events)")
-                            except Exception as ping_err:
-                                print(f"⚠️ Ping failed: {ping_err}")
-                                break  # Reconnect
+                            if heartbeat_count % 4 == 0:  # Every 2 minutes
+                                print(f"   💓 WebSocket alive ({heartbeat_count * 30}s, {self.events_received} events, {self.whale_trades_detected} whale trades)")
                             continue
 
             except websockets.exceptions.ConnectionClosed as e:
@@ -199,9 +204,14 @@ class WebSocketTradeMonitor:
             except Exception as e:
                 print(f"⚠️ WebSocket error: {type(e).__name__}: {e}")
                 # Exponential backoff for repeated failures
-                wait_time = min(10 * reconnect_count, 60)
+                wait_time = min(5 * reconnect_count, 60)
                 print(f"   Retrying in {wait_time}s...")
                 await asyncio.sleep(wait_time)
+
+        # If we exhausted reconnects, fall back to polling
+        if reconnect_count >= max_reconnects:
+            print(f"⚠️ WebSocket reconnect limit reached, falling back to polling")
+            await self._run_polling_monitor()
 
     async def _process_log_event(self, log_data: dict):
         """Process a raw log event from WebSocket"""
@@ -210,14 +220,20 @@ class WebSocketTradeMonitor:
 
         try:
             # Decode the event
-            # Topics: [event_sig, orderHash (indexed)]
-            # Data: maker, taker, makerAssetId, takerAssetId, makerAmountFilled, takerAmountFilled, fee
+            # OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker,
+            #             uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled,
+            #             uint256 takerAmountFilled, uint256 fee)
+            #
+            # Topics: [event_sig, orderHash, maker, taker] - indexed params
+            # Data: [makerAssetId, takerAssetId, makerAmountFilled, takerAmountFilled, fee] - non-indexed
 
-            data = bytes.fromhex(log_data['data'][2:])  # Remove 0x prefix
+            topics = log_data.get('topics', [])
+            if len(topics) < 4:
+                return  # Invalid event
 
-            # Decode addresses (32 bytes each, right-padded)
-            maker = '0x' + data[12:32].hex()  # First 12 bytes are padding
-            taker = '0x' + data[44:64].hex()
+            # Indexed addresses are in topics (padded to 32 bytes)
+            maker = '0x' + topics[2][-40:]  # Last 20 bytes (40 hex chars)
+            taker = '0x' + topics[3][-40:]
 
             maker_lower = maker.lower()
             taker_lower = taker.lower()
@@ -234,9 +250,12 @@ class WebSocketTradeMonitor:
                     whale = taker
                     side = 'BUY'
 
-                # Decode amounts
-                maker_amount = int.from_bytes(data[128:160], 'big')
-                taker_amount = int.from_bytes(data[160:192], 'big')
+                # Decode amounts from data (non-indexed params)
+                # Each uint256 is 32 bytes (64 hex chars)
+                data = log_data['data'][2:]  # Remove 0x prefix
+                # makerAssetId at offset 0, takerAssetId at 64, makerAmountFilled at 128, takerAmountFilled at 192
+                maker_amount = int(data[128:192], 16)  # makerAmountFilled
+                taker_amount = int(data[192:256], 16)  # takerAmountFilled
 
                 trade_data = {
                     'whale_address': whale,

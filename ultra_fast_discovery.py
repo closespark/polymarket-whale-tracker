@@ -44,6 +44,9 @@ class UltraFastDiscovery:
         self.whale_database = {}
         self.monitoring_pool = []
 
+        # Load cached pool on startup
+        self._load_cached_pool()
+
         # Scan interval: Every minute for new blocks
         self.scan_interval = 60
 
@@ -379,6 +382,44 @@ class UltraFastDiscovery:
                 print(f"      📉 Removed {len(removed)}")
 
         self.export_state()
+
+    def _load_cached_pool(self):
+        """Load monitoring pool from cached CSV file on startup"""
+        import os
+
+        pool_file = 'ultra_fast_pool.csv'
+        if not os.path.exists(pool_file):
+            print("   No cached pool file found")
+            return
+
+        try:
+            df = pd.read_csv(pool_file)
+            if df.empty:
+                return
+
+            # Convert dataframe to list of dicts
+            self.monitoring_pool = df.to_dict('records')
+
+            # Also populate whale_database for update_pool to work
+            for w in self.monitoring_pool:
+                addr = w.get('address', '')
+                if addr:
+                    self.whale_database[addr] = {
+                        'address': addr,
+                        'discovery_time': datetime.now(),
+                        'last_seen': datetime.now(),
+                        'trade_count': w.get('trade_count', 0),
+                        'estimated_profit': w.get('estimated_profit', 0),
+                        'estimated_win_rate': w.get('estimated_win_rate', 0.72),
+                        'wins': w.get('wins', 0),
+                        'losses': w.get('losses', 0),
+                        'total_volume': w.get('total_volume', 0)
+                    }
+
+            print(f"   ✅ Loaded {len(self.monitoring_pool)} whales from cache")
+
+        except Exception as e:
+            print(f"   ⚠️ Could not load cached pool: {e}")
 
     def export_state(self):
         """Export current state"""
