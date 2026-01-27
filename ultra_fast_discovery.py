@@ -179,7 +179,6 @@ class UltraFastDiscovery:
                                 if chunk_events:
                                     added = self.db.add_trades_from_events(chunk_events)
                                     total_added += added
-                                    await self.check_whale_activity(chunk_events)
                                     del chunk_events  # Free memory immediately
                             except Exception as chunk_err:
                                 print(f"   ⚠️ Chunk error: {chunk_err}")
@@ -195,7 +194,6 @@ class UltraFastDiscovery:
                         if events:
                             total_added = self.db.add_trades_from_events(events)
                             print(f"   📥 Stored {total_added} new trades")
-                            await self.check_whale_activity(events)
                             del events  # Free memory
                 except Exception as e:
                     print(f"   ⚠️ Error fetching events: {e}")
@@ -208,28 +206,6 @@ class UltraFastDiscovery:
             except Exception as e:
                 print(f"   ❌ Scan error: {e}")
                 await asyncio.sleep(10)
-
-    async def check_whale_activity(self, events):
-        """
-        Quick check if any monitored whales made trades
-
-        Updates whale_database with recent activity
-        """
-
-        monitored_addresses = set(w['address'] for w in self.monitoring_pool)
-
-        for event in events:
-            maker = event['args']['maker']
-            taker = event['args']['taker']
-
-            for address in [maker, taker]:
-                if address in monitored_addresses:
-                    # Update last seen
-                    if address in self.whale_database:
-                        self.whale_database[address]['last_seen'] = datetime.now()
-                        self.whale_database[address]['recent_trade_count'] = \
-                            self.whale_database[address].get('recent_trade_count', 0) + 1
-                        print(f"   🐋 Whale active: {address[:10]}...")
 
     async def pool_refresh_loop(self):
         """
