@@ -52,8 +52,12 @@ class UltraFastDiscovery:
         # Pool refresh interval: Every 15 minutes (uses database, instant)
         self.pool_refresh_interval = 900
 
-        # Pruning interval: Every hour
-        self.prune_interval = 3600
+        # Pruning interval: Every 30 minutes (more aggressive for memory-constrained environments)
+        self.prune_interval = 1800
+
+        # Keep fewer blocks on Render (memory constrained)
+        import os
+        self.keep_blocks = 30000 if os.environ.get('DB_PATH', '').startswith('/var') else 50000
 
         print("⚡ ULTRA-FAST DISCOVERY v2 (Optimized)")
         print(f"   Scan interval: Every {self.scan_interval}s (new blocks only)")
@@ -271,9 +275,9 @@ class UltraFastDiscovery:
         while True:
             await asyncio.sleep(self.prune_interval)
 
-            deleted = self.db.prune_old_blocks(keep_blocks=50000)
+            deleted = self.db.prune_old_blocks(keep_blocks=self.keep_blocks)
             if deleted > 0:
-                print(f"\n🗑️ Pruned {deleted:,} old trades (keeping last 50K blocks)")
+                print(f"\n🗑️ Pruned {deleted:,} old trades (keeping last {self.keep_blocks//1000}K blocks)")
 
     async def update_pool(self):
         """
@@ -334,17 +338,27 @@ class UltraFastDiscovery:
 
     async def print_stats_loop(self):
         """Print database stats every 2 minutes"""
+        import os
 
         while True:
             await asyncio.sleep(120)
 
             db_stats = self.db.get_database_stats()
 
+            # Check database file size
+            db_path = os.environ.get('DB_PATH', 'trades.db')
+            try:
+                db_size_mb = os.path.getsize(db_path) / (1024 * 1024)
+                db_size_str = f"{db_size_mb:.0f}MB" if db_size_mb < 1024 else f"{db_size_mb/1024:.1f}GB"
+            except:
+                db_size_str = "?"
+
             print("\n" + "-"*80)
             print(f"📊 DISCOVERY STATS - {datetime.now().strftime('%H:%M:%S')}")
             print("-"*80)
-            print(f"🗄️  Database: {db_stats['trade_count']:,} trades, {db_stats['block_range']:,} blocks")
+            print(f"🗄️  Database: {db_stats['trade_count']:,} trades, {db_stats['block_range']:,} blocks ({db_size_str})")
             print(f"📡 Last scanned block: {db_stats.get('last_scanned', 'N/A')}")
+            print(f"🧹 Keeping last {self.keep_blocks//1000}K blocks, pruning every {self.prune_interval//60}min")
             print("-"*80 + "\n")
 
     def get_monitoring_addresses(self):
