@@ -82,6 +82,7 @@ CTFEXCHANGE_ABI = [
         "type": "event"
     }
 ]
+CTF_EXCHANGE_ABI = CTFEXCHANGE_ABI  # Alias for websocket_monitor
 
 # Conditional Tokens ABI (simplified)
 CONDITIONAL_TOKENS_ABI = [
