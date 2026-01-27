@@ -901,7 +901,7 @@ class TradeDatabase:
         self.conn.execute("DELETE FROM whale_timeframe_stats")
 
         for tf, traders in tiers.items():
-            for t in traders[:50]:  # Top 50 per tier
+            for t in traders:  # No limit - cache all qualified whales
                 self.conn.execute("""
                     INSERT INTO whale_timeframe_stats
                     (address, timeframe, trade_count, wins, losses, volume, profit, win_rate)

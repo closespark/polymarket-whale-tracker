@@ -750,15 +750,18 @@ class SmallCapitalSystem:
         print("="*80)
         print()
         
-        # Initial discovery
-        print("🔍 Finding best 15-min traders...")
+        # Initial discovery - refreshes whale data from database
+        print("🔍 Analyzing traders from database...")
         await self.discovery.deep_scan()
 
-        print(f"\n✅ Found {len(self.discovery.monitoring_pool)} whales to monitor")
-        print(f"   Starting with ${self.current_capital:.2f}\n")
-
-        # v2: Populate multi-timeframe tiers from discovery
+        # Populate multi-timeframe tiers from database analysis
+        # This determines which whales to monitor via WebSocket
         self._populate_multi_timeframe_tiers()
+
+        # Report actual whale count from tiers (not legacy monitoring_pool)
+        total_whales = sum(len(tier.whales) for tier in self.multi_tf_strategy.tiers.values())
+        print(f"\n✅ Monitoring {total_whales} whales across all tiers")
+        print(f"   Starting with ${self.current_capital:.2f}\n")
 
         # v2: Start embedded dashboard
         await self.dashboard.start()
