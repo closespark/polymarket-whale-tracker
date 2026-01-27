@@ -521,61 +521,38 @@ class TradeDatabase:
         print(f"   {cached_count} cached, {len(uncached_tokens)} need metadata...")
 
         # Use Gamma API with clob_token_ids parameter for direct lookup
-        # The API supports comma-separated token IDs for batch lookups
-        print(f"   Fetching from Polymarket Gamma API (batch token lookup)...")
+        # Note: API only supports single token lookups, not comma-separated batches
+        print(f"   Fetching from Polymarket Gamma API (single token lookup)...")
 
         token_to_question = {}
         uncached_list = list(uncached_tokens)
-        batch_size = 20  # Query 20 tokens at a time (API supports multiple)
 
-        for i in range(0, min(len(uncached_list), max_tokens), batch_size):
-            batch = uncached_list[i:i + batch_size]
+        # Limit to prevent excessive API calls on first run
+        max_to_fetch = min(len(uncached_list), max_tokens, 500)  # Cap at 500 for first run
 
+        for i, token_id in enumerate(uncached_list[:max_to_fetch]):
             try:
-                # Gamma API supports comma-separated clob_token_ids
-                token_ids_param = ','.join(batch)
-                url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_ids_param}"
-                response = requests.get(url, timeout=15)
+                url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
+                response = requests.get(url, timeout=10)
 
                 if response.status_code == 200:
                     markets = response.json()
-                    for market in markets:
-                        question = market.get('question', '')
-                        # Get token IDs from the market
-                        clob_token_ids = market.get('clobTokenIds', '[]')
-                        if isinstance(clob_token_ids, str):
-                            try:
-                                import json as json_module
-                                clob_token_ids = json_module.loads(clob_token_ids)
-                            except:
-                                clob_token_ids = []
-
-                        # Map each token ID to the question
-                        for tid in clob_token_ids:
-                            tid_str = str(tid)
-                            if tid_str in uncached_tokens:
-                                token_to_question[tid_str] = question
+                    # API returns a list for single token query
+                    if isinstance(markets, list) and markets:
+                        question = markets[0].get('question', '')
+                        if question:
+                            token_to_question[token_id] = question
 
             except Exception as e:
-                # On error, try individual lookups for this batch
-                for token_id in batch:
-                    try:
-                        url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
-                        response = requests.get(url, timeout=10)
-                        if response.status_code == 200:
-                            markets = response.json()
-                            if markets:
-                                token_to_question[token_id] = markets[0].get('question', '')
-                    except:
-                        pass
+                pass  # Skip failed lookups silently
 
-            # Progress update - more frequent to show activity
-            if (i + batch_size) % 40 == 0:
-                print(f"      Checked {i + batch_size}/{len(uncached_list)} tokens, found {len(token_to_question)} with metadata...")
+            # Progress update
+            if (i + 1) % 50 == 0:
+                print(f"      Checked {i + 1}/{max_to_fetch} tokens, found {len(token_to_question)} with metadata...")
                 import sys
                 sys.stdout.flush()
 
-            time.sleep(batch_delay)  # Rate limit
+            time.sleep(batch_delay)  # Rate limit (0.3s = ~3 req/sec)
 
         print(f"   Found metadata for {len(token_to_question)} tokens")
 
