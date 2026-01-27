@@ -1697,8 +1697,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import time
-    print("⏸️  Service paused - waiting for database upload...")
-    while True:
-        time.sleep(60)
-        print("   Still waiting...")
+    asyncio.run(main())
