@@ -355,9 +355,11 @@ class MultiTimeframeStrategy:
                     }
                     tier.add_whale(whale_data)
 
-            print(f"   Loaded {total} specialists from database:")
+            # Count actual loaded whales (after tier limits)
+            loaded_count = sum(len(tier.whales) for tier in self.tiers.values())
+            print(f"   Loaded {loaded_count} whales from {total} specialists found:")
             for tf_name, tier in self.tiers.items():
-                print(f"      {tier.name}: {len(tier.whales)} whales")
+                print(f"      {tier.name}: {len(tier.whales)}/{tier.max_whales} whales")
 
             return True
 
