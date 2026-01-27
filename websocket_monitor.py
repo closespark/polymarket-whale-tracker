@@ -160,6 +160,7 @@ class WebSocketTradeMonitor:
                         print(f"⚠️ Subscription response: {sub_response}")
 
                     # Listen for events
+                    heartbeat_count = 0
                     while self.running:
                         try:
                             message = await asyncio.wait_for(ws.recv(), timeout=30)
@@ -170,15 +171,24 @@ class WebSocketTradeMonitor:
 
                         except asyncio.TimeoutError:
                             # Send ping to keep connection alive
-                            await ws.ping()
+                            heartbeat_count += 1
+                            try:
+                                await ws.ping()
+                                if heartbeat_count % 4 == 0:  # Every 2 minutes
+                                    print(f"   💓 WebSocket alive ({heartbeat_count * 30}s, {self.events_received} events)")
+                            except Exception as ping_err:
+                                print(f"⚠️ Ping failed: {ping_err}")
+                                break  # Reconnect
                             continue
 
-            except websockets.exceptions.ConnectionClosed:
-                print("⚠️ WebSocket connection closed, reconnecting...")
+            except websockets.exceptions.ConnectionClosed as e:
+                print(f"⚠️ WebSocket connection closed ({e}), reconnecting...")
                 await asyncio.sleep(5)
 
             except Exception as e:
-                print(f"⚠️ WebSocket error: {e}")
+                print(f"⚠️ WebSocket error: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
                 await asyncio.sleep(10)
 
     async def _process_log_event(self, log_data: dict):

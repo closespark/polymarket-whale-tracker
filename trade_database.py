@@ -569,9 +569,11 @@ class TradeDatabase:
                     except:
                         pass
 
-            # Progress update
-            if (i + batch_size) % 100 == 0:
-                print(f"      Checked {i + batch_size} tokens, found {len(token_to_question)} with metadata...")
+            # Progress update - more frequent to show activity
+            if (i + batch_size) % 40 == 0:
+                print(f"      Checked {i + batch_size}/{len(uncached_list)} tokens, found {len(token_to_question)} with metadata...")
+                import sys
+                sys.stdout.flush()
 
             time.sleep(batch_delay)  # Rate limit
 
