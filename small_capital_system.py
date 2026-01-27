@@ -828,10 +828,23 @@ class SmallCapitalSystem:
 
 async def main():
     """Run $100 capital system"""
-    
+
+    # Check for maintenance mode (for safe database uploads)
+    import os
+    if os.environ.get('MAINTENANCE_MODE') == 'true':
+        print("🔧 MAINTENANCE MODE ENABLED")
+        print("   System is paused for database upload")
+        print("   Set MAINTENANCE_MODE=false to resume")
+        print("   SSH is available for file uploads")
+
+        # Keep alive but don't run the system
+        while True:
+            await asyncio.sleep(60)
+            print("   ⏸️  Maintenance mode active...")
+
     # Get starting capital from user or use default
     starting_capital = 100
-    
+
     system = SmallCapitalSystem(starting_capital=starting_capital)
     await system.run()
 
