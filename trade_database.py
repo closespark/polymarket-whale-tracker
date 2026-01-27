@@ -648,12 +648,12 @@ class TradeDatabase:
         trader_count = cursor.fetchone()[0]
         print(f"   Found {trader_count:,} traders with 10+ trades in known timeframes")
 
-        # Tier requirements
+        # Tier requirements - lowered slightly for more coverage
         tier_requirements = {
-            '15min': {'min_trades': 20, 'min_win_rate': 0.75},
-            'hourly': {'min_trades': 15, 'min_win_rate': 0.73},
-            '4hour': {'min_trades': 10, 'min_win_rate': 0.72},
-            'daily': {'min_trades': 10, 'min_win_rate': 0.70}
+            '15min': {'min_trades': 15, 'min_win_rate': 0.70},
+            'hourly': {'min_trades': 12, 'min_win_rate': 0.68},
+            '4hour': {'min_trades': 8, 'min_win_rate': 0.65},
+            'daily': {'min_trades': 8, 'min_win_rate': 0.65}
         }
 
         tiers = {'15min': [], 'hourly': [], '4hour': [], 'daily': []}
@@ -668,7 +668,7 @@ class TradeDatabase:
                   AND trades >= ?
                   AND CAST(wins AS REAL) / trades >= ?
                 ORDER BY (CAST(wins AS REAL) / trades * 0.6) + (MIN(profit / 1000.0, 0.4)) DESC
-                LIMIT 50
+                LIMIT 200
             """, (tf, req['min_trades'], req['min_win_rate']))
 
             for row in cursor:

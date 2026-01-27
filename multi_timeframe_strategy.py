@@ -76,13 +76,15 @@ class MultiTimeframeStrategy:
 
     def __init__(self):
         # Define tiers - no artificial limits, monitor all qualified whales
+        # Note: min_win_rate here is for COPY THRESHOLD (higher), not for discovery
+        # Discovery uses lower thresholds in trade_database.py to find more whales
         self.tiers = {
             '15min': WhaleTimeframeTier(
                 name='Tier 1: 15-Min Specialists',
                 timeframe='15min',
                 base_threshold=88.0,
                 position_multiplier=1.2,
-                min_win_rate=0.75,
+                min_win_rate=0.70,  # Lowered for more coverage (confidence still filters)
                 max_whales=1000  # No practical limit
             ),
             'hourly': WhaleTimeframeTier(
@@ -90,7 +92,7 @@ class MultiTimeframeStrategy:
                 timeframe='hourly',
                 base_threshold=90.0,
                 position_multiplier=1.0,
-                min_win_rate=0.73,
+                min_win_rate=0.68,
                 max_whales=1000  # No practical limit
             ),
             '4hour': WhaleTimeframeTier(
@@ -98,7 +100,7 @@ class MultiTimeframeStrategy:
                 timeframe='4hour',
                 base_threshold=92.0,
                 position_multiplier=0.8,
-                min_win_rate=0.72,
+                min_win_rate=0.65,
                 max_whales=1000  # No practical limit
             ),
             'daily': WhaleTimeframeTier(
@@ -106,7 +108,7 @@ class MultiTimeframeStrategy:
                 timeframe='daily',
                 base_threshold=93.0,
                 position_multiplier=0.7,
-                min_win_rate=0.70,
+                min_win_rate=0.65,
                 max_whales=1000  # No practical limit
             )
         }
