@@ -176,24 +176,15 @@ class SmallCapitalSystem:
 
         while True:
             try:
-                # Get whales from tiers (these are the ones we'll look up)
-                # This ensures WebSocket monitors the same addresses that are in tiers
-                tier_addresses = self._get_all_tier_addresses()
-
-                # Fall back to discovery pool if tiers are empty
-                if tier_addresses:
-                    whale_addresses = tier_addresses
-                    print(f"\n🔌 Using {len(whale_addresses)} addresses from tiers")
-                else:
-                    whale_addresses = self.discovery.get_monitoring_addresses()
-                    print(f"\n🔌 Using {len(whale_addresses)} addresses from discovery pool")
+                # Get whales from tiers - database is the single source of truth
+                whale_addresses = self._get_all_tier_addresses()
 
                 if not whale_addresses:
+                    print("⚠️ No whales in tiers - waiting for database analysis...")
                     await asyncio.sleep(60)
                     continue
 
-                # v2: Use WebSocket monitor for faster detection
-                print(f"🔌 Starting WebSocket monitor for {len(whale_addresses)} whales")
+                print(f"\n🔌 Starting WebSocket monitor for {len(whale_addresses)} tier whales")
 
                 self.ws_monitor = HybridMonitor(whale_addresses)
 
@@ -722,50 +713,21 @@ class SmallCapitalSystem:
 
     def _populate_multi_timeframe_tiers(self):
         """
-        Populate multi-timeframe tiers from discovered whales
+        Populate multi-timeframe tiers from database analysis
 
-        For now, all discovered whales go into 15-min tier
-        Future: analyze their trading patterns to assign to appropriate tiers
+        Database is the single source of truth - no fallbacks
         """
         try:
-            # Get whale data from discovery
-            whale_db = getattr(self.discovery, 'whale_database', {})
-            monitoring_pool = getattr(self.discovery, 'monitoring_pool', [])
-
-            if not monitoring_pool:
-                print("⚠️ No whales in monitoring pool for tier assignment")
+            # Get database from discovery
+            db = getattr(self.discovery, 'db', None)
+            if not db:
+                print("⚠️ No database available for tier population")
                 return
 
-            # Convert to list of whale dicts
-            specialists = []
-            for item in monitoring_pool:
-                # Handle both dict format (from ultra_fast_discovery) and string format
-                if isinstance(item, dict):
-                    addr = item.get('address', '')
-                    specialists.append({
-                        'address': addr,
-                        'win_rate': item.get('estimated_win_rate', 0.72),
-                        'trade_count': item.get('trade_count', 0),
-                        'profit': item.get('estimated_profit', 0)
-                    })
-                else:
-                    # String address
-                    addr = item
-                    whale_info = whale_db.get(addr, {})
-                    specialists.append({
-                        'address': addr,
-                        'win_rate': whale_info.get('estimated_win_rate', 0.72),
-                        'trade_count': whale_info.get('trade_count', 0),
-                        'profit': whale_info.get('estimated_profit', 0)
-                    })
-
-            # Sort by win rate
-            specialists.sort(key=lambda x: x['win_rate'], reverse=True)
-
-            # Try to populate from database (best), then file, then specialists
-            # Pass the database so it can analyze traders by timeframe
-            db = getattr(self.discovery, 'db', None)
-            self.multi_tf_strategy.populate_from_any_source(specialists, db=db)
+            # Load directly from database - no fallbacks
+            if not self.multi_tf_strategy.load_from_database(db):
+                print("⚠️ Failed to load tiers from database")
+                return
 
             print(f"\n📊 MULTI-TIMEFRAME TIERS POPULATED:")
             total_whales = 0
