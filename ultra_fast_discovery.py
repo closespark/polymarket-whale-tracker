@@ -82,8 +82,16 @@ class UltraFastDiscovery:
             # Load cached whale stats
             await self.load_from_database()
         else:
-            print("🔍 No existing data - running initial deep scan...")
-            await self.initial_deep_scan()
+            # Skip deep scan on Render (memory constrained)
+            # Instead, build up data via incremental scans
+            import os
+            if os.environ.get('SKIP_DEEP_SCAN') or os.environ.get('DB_PATH', '').startswith('/var'):
+                print("⚠️ No existing data - skipping deep scan (memory constrained)")
+                print("   Data will be built incrementally via regular scans")
+                print("   Upload pre-scanned trades.db for instant data")
+            else:
+                print("🔍 No existing data - running initial deep scan...")
+                await self.initial_deep_scan()
 
         # Start all loops
         scan_task = asyncio.create_task(self.incremental_scan_loop())
