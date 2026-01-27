@@ -574,50 +574,81 @@ class TradeDatabase:
         """
         Analyze all traders and group by their best-performing timeframe
 
+        Memory-optimized: Uses SQL aggregation instead of Python dicts
+        to handle large datasets within 512MB memory limit.
+
         Returns: Dict mapping timeframe -> list of qualified traders
         """
-        print("Analyzing traders by timeframe...")
+        print("Analyzing traders by timeframe (SQL-optimized)...")
 
-        # Build token -> timeframe mapping from cache
-        cursor = self.conn.execute("SELECT token_id, timeframe FROM market_metadata")
-        token_timeframes = {row[0]: row[1] for row in cursor.fetchall()}
-
-        if not token_timeframes:
-            print("   No market metadata cached - run fetch_market_timeframes first")
-            return {}
-
-        # Build stats: address -> timeframe -> stats
-        trader_tf_stats = defaultdict(lambda: defaultdict(lambda: {
-            'trades': 0, 'wins': 0, 'losses': 0, 'volume': 0, 'profit': 0
-        }))
-
-        # Process all trades
-        cursor = self.conn.execute("""
-            SELECT maker, taker, maker_amount, taker_amount, asset_id
-            FROM trades WHERE asset_id IS NOT NULL AND asset_id != ''
+        # First, create a temporary table joining trades with timeframes
+        # This lets SQLite do the heavy lifting instead of Python
+        self.conn.execute("DROP TABLE IF EXISTS temp_trade_timeframes")
+        self.conn.execute("""
+            CREATE TEMP TABLE temp_trade_timeframes AS
+            SELECT
+                t.maker, t.taker, t.maker_amount, t.taker_amount,
+                m.timeframe,
+                CAST(t.taker_amount AS REAL) / 1000000.0 as usdc_amount,
+                CASE WHEN t.maker_amount > 0
+                     THEN CAST(t.taker_amount AS REAL) / CAST(t.maker_amount AS REAL)
+                     ELSE 0.5 END as price
+            FROM trades t
+            JOIN market_metadata m ON t.asset_id = m.token_id
+            WHERE m.timeframe != 'unknown'
         """)
 
-        trade_count = 0
-        for row in cursor:
-            trade_count += 1
-            maker, taker, maker_amount, taker_amount, asset_id = row
+        # Count matched trades
+        cursor = self.conn.execute("SELECT COUNT(*) FROM temp_trade_timeframes")
+        matched_count = cursor.fetchone()[0]
+        print(f"   Matched {matched_count:,} trades with timeframe metadata")
 
-            timeframe = token_timeframes.get(asset_id, 'unknown')
-            if timeframe == 'unknown':
-                continue
+        if matched_count == 0:
+            print("   No trades matched - need more market metadata")
+            return {'15min': [], 'hourly': [], '4hour': [], 'daily': []}
 
-            usdc_amount = taker_amount / 1e6 if taker_amount else 0
-            token_amount = maker_amount / 1e6 if maker_amount else 1
-            price = usdc_amount / token_amount if token_amount > 0 else 0.5
+        # Aggregate stats per address per timeframe using SQL
+        # This processes millions of rows without loading them all into Python
+        self.conn.execute("DROP TABLE IF EXISTS temp_trader_stats")
+        self.conn.execute("""
+            CREATE TEMP TABLE temp_trader_stats AS
+            SELECT
+                address,
+                timeframe,
+                COUNT(*) as trades,
+                SUM(CASE WHEN is_win = 1 THEN 1 ELSE 0 END) as wins,
+                SUM(usdc_amount) as volume,
+                SUM(CASE WHEN is_win = 1 THEN usdc_amount * 0.3
+                         WHEN is_loss = 1 THEN -usdc_amount * 0.2
+                         ELSE 0 END) as profit
+            FROM (
+                -- Maker side (SELL)
+                SELECT
+                    LOWER(maker) as address,
+                    timeframe,
+                    usdc_amount,
+                    CASE WHEN price > 0.55 THEN 1 ELSE 0 END as is_win,
+                    CASE WHEN price < 0.25 THEN 1 ELSE 0 END as is_loss
+                FROM temp_trade_timeframes
+                UNION ALL
+                -- Taker side (BUY)
+                SELECT
+                    LOWER(taker) as address,
+                    timeframe,
+                    usdc_amount,
+                    CASE WHEN price < 0.45 THEN 1 ELSE 0 END as is_win,
+                    CASE WHEN price > 0.75 THEN 1 ELSE 0 END as is_loss
+                FROM temp_trade_timeframes
+            )
+            GROUP BY address, timeframe
+            HAVING COUNT(*) >= 10
+        """)
 
-            # Update maker (SELL)
-            self._update_tf_stats(trader_tf_stats[maker.lower()][timeframe], 'SELL', price, usdc_amount)
-            # Update taker (BUY)
-            self._update_tf_stats(trader_tf_stats[taker.lower()][timeframe], 'BUY', price, usdc_amount)
+        cursor = self.conn.execute("SELECT COUNT(DISTINCT address) FROM temp_trader_stats")
+        trader_count = cursor.fetchone()[0]
+        print(f"   Found {trader_count:,} traders with 10+ trades in known timeframes")
 
-        print(f"   Processed {trade_count:,} trades")
-
-        # Assign traders to their best timeframe
+        # Tier requirements
         tier_requirements = {
             '15min': {'min_trades': 20, 'min_win_rate': 0.75},
             'hourly': {'min_trades': 15, 'min_win_rate': 0.73},
@@ -627,48 +658,36 @@ class TradeDatabase:
 
         tiers = {'15min': [], 'hourly': [], '4hour': [], 'daily': []}
 
-        for address, tf_stats in trader_tf_stats.items():
-            best_tf = None
-            best_score = 0
+        # Query qualified traders for each timeframe
+        for tf, req in tier_requirements.items():
+            cursor = self.conn.execute("""
+                SELECT address, trades, wins, volume, profit,
+                       CAST(wins AS REAL) / trades as win_rate
+                FROM temp_trader_stats
+                WHERE timeframe = ?
+                  AND trades >= ?
+                  AND CAST(wins AS REAL) / trades >= ?
+                ORDER BY (CAST(wins AS REAL) / trades * 0.6) + (MIN(profit / 1000.0, 0.4)) DESC
+                LIMIT 50
+            """, (tf, req['min_trades'], req['min_win_rate']))
 
-            for tf in ['15min', 'hourly', '4hour', 'daily']:
-                stats = tf_stats.get(tf, {'trades': 0})
-                trades = stats['trades']
-
-                req = tier_requirements.get(tf, {'min_trades': 10, 'min_win_rate': 0.70})
-                if trades < req['min_trades']:
-                    continue
-
-                total = stats['wins'] + stats['losses']
-                win_rate = stats['wins'] / total if total > 0 else 0
-                if win_rate < req['min_win_rate']:
-                    continue
-
-                # Score: win rate + profit factor
-                score = (win_rate * 0.6) + (min(stats['profit'] / 1000, 0.4))
-                if score > best_score:
-                    best_score = score
-                    best_tf = tf
-
-            if best_tf:
-                stats = tf_stats[best_tf]
-                total = stats['wins'] + stats['losses']
-                win_rate = stats['wins'] / total if total > 0 else 0
-
-                tiers[best_tf].append({
+            for row in cursor:
+                address, trades, wins, volume, profit, win_rate = row
+                score = (win_rate * 0.6) + min(profit / 1000.0, 0.4)
+                tiers[tf].append({
                     'address': address,
-                    'specialty': best_tf,
-                    'trades': stats['trades'],
-                    'wins': stats['wins'],
+                    'specialty': tf,
+                    'trades': trades,
+                    'wins': wins,
                     'win_rate': round(win_rate, 4),
-                    'volume': round(stats['volume'], 2),
-                    'profit': round(stats['profit'], 2),
-                    'score': round(best_score, 4)
+                    'volume': round(volume, 2),
+                    'profit': round(profit, 2),
+                    'score': round(score, 4)
                 })
 
-        # Sort each tier by score
-        for tf in tiers:
-            tiers[tf].sort(key=lambda x: x['score'], reverse=True)
+        # Cleanup temp tables
+        self.conn.execute("DROP TABLE IF EXISTS temp_trade_timeframes")
+        self.conn.execute("DROP TABLE IF EXISTS temp_trader_stats")
 
         # Cache results
         self._cache_timeframe_stats(tiers)

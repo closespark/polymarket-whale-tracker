@@ -433,9 +433,9 @@ class MultiTimeframeStrategy:
 
                 # Fetch market metadata if needed (queries Polymarket API)
                 print("   Fetching market metadata from Polymarket Gamma API...")
-                db.fetch_market_timeframes(max_tokens=2000)
+                db.fetch_market_timeframes(max_tokens=300)
 
-                # Run the analysis
+                # Run the analysis (memory-optimized)
                 tiers_data = db.analyze_traders_by_timeframe()
                 total = sum(len(t) for t in tiers_data.values())
 
