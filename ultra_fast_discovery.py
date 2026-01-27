@@ -1,12 +1,15 @@
 """
-Ultra-Fast Discovery System
-Scans blockchain EVERY MINUTE to catch new whales instantly
+Ultra-Fast Discovery System v2 (Optimized)
 
-Two-tier approach:
-1. LIGHT scan every minute (last 200 blocks ~ 5 minutes)
-2. DEEP scan every hour (last 50,000 blocks ~ 1 week)
+MAJOR IMPROVEMENTS over v1:
+- SQLite storage: No more redundant re-scanning
+- Incremental-only: Only scans NEW blocks, appends to database
+- Rolling window: Keeps last 50K blocks, prunes old data
+- Instant pool refresh: Queries database instead of blockchain
 
-This maximizes opportunity detection while managing costs
+RPC Usage:
+- OLD: ~53,000 blocks/hour (wasteful)
+- NEW: ~3,000 blocks/hour (94% reduction!)
 """
 
 import asyncio
@@ -15,358 +18,412 @@ from collections import defaultdict
 import pandas as pd
 import json
 
-from whale_analyzer import PolymarketWhaleAnalyzer
+from trade_database import TradeDatabase
 from fifteen_minute_analyzer import FifteenMinuteWhaleAnalyzer
 import config
 
 
 class UltraFastDiscovery:
     """
-    Scans every minute for new profitable 15-min traders
-    
-    Perfect for $100 starting capital - need to catch EVERY opportunity
+    Optimized scanner with persistent storage
+
+    Scans every minute for new trades, stores in SQLite
+    Pool refresh uses stored data - no blockchain re-scanning
     """
-    
-    def __init__(self):
+
+    def __init__(self, db_path: str = "trades.db"):
+        # Use lightweight analyzer for blockchain connection only
         self.analyzer = FifteenMinuteWhaleAnalyzer()
+
+        # SQLite database for persistent storage
+        self.db = TradeDatabase(db_path, max_blocks=50000)
+
         self.whale_database = {}
         self.monitoring_pool = []
-        
-        # Two scan intervals
-        self.light_scan_interval = 60  # 1 minute
-        self.deep_scan_interval = 3600  # 1 hour
-        
-        # Track what we've seen
-        self.last_light_scan_block = 0
-        self.last_deep_scan_block = 0
-        
-        print("⚡ ULTRA-FAST DISCOVERY MODE")
-        print(f"   Light scan: Every {self.light_scan_interval} seconds")
-        print(f"   Deep scan: Every {self.deep_scan_interval/60:.0f} minutes")
-        print(f"   Goal: NEVER miss a hot new whale")
-    
+
+        # Scan interval: Every minute for new blocks
+        self.scan_interval = 60
+
+        # Pool refresh interval: Every 15 minutes (uses database, instant)
+        self.pool_refresh_interval = 900
+
+        # Pruning interval: Every hour
+        self.prune_interval = 3600
+
+        print("⚡ ULTRA-FAST DISCOVERY v2 (Optimized)")
+        print(f"   Scan interval: Every {self.scan_interval}s (new blocks only)")
+        print(f"   Pool refresh: Every {self.pool_refresh_interval/60:.0f}min (from database)")
+        print(f"   Storage: SQLite ({db_path})")
+
     async def run_ultra_fast_discovery(self):
-        """
-        Main loop with two parallel scan types
-        """
-        
+        """Main loop with incremental scanning"""
+
         print("\n" + "="*80)
-        print("⚡ ULTRA-FAST DISCOVERY ACTIVE")
+        print("⚡ ULTRA-FAST DISCOVERY v2 ACTIVE")
         print("="*80)
-        print("\nWith $100 capital, we need MAXIMUM opportunities")
-        print("Scanning every minute to catch new whales instantly!\n")
-        
-        # Initial deep scan
-        print("🔍 Initial deep scan...")
-        await self.deep_scan()
-        
-        # Start both loops
-        light_task = asyncio.create_task(self.light_scan_loop())
-        deep_task = asyncio.create_task(self.deep_scan_loop())
+        print("\nOptimized for efficiency:")
+        print("  • Only scans NEW blocks (not historical)")
+        print("  • Stores all trades in SQLite")
+        print("  • Pool refresh from database (instant)")
+        print("  • 94% fewer RPC calls than v1\n")
+
+        # Check if we have existing data
+        stats = self.db.get_database_stats()
+
+        if stats['trade_count'] > 0:
+            print(f"📊 Existing data found:")
+            print(f"   Trades: {stats['trade_count']:,}")
+            print(f"   Block range: {stats['oldest_block']:,} → {stats['newest_block']:,}")
+            print(f"   Coverage: {stats['block_range']:,} blocks")
+
+            # Load cached whale stats
+            await self.load_from_database()
+        else:
+            print("🔍 No existing data - running initial deep scan...")
+            await self.initial_deep_scan()
+
+        # Start all loops
+        scan_task = asyncio.create_task(self.incremental_scan_loop())
+        refresh_task = asyncio.create_task(self.pool_refresh_loop())
+        prune_task = asyncio.create_task(self.prune_loop())
         stats_task = asyncio.create_task(self.print_stats_loop())
-        
+
         try:
-            await asyncio.gather(light_task, deep_task, stats_task)
+            await asyncio.gather(scan_task, refresh_task, prune_task, stats_task)
         except KeyboardInterrupt:
             print("\n⚠️  Discovery stopped")
-    
-    async def light_scan_loop(self):
+            self.db.close()
+
+    async def initial_deep_scan(self):
         """
-        LIGHT SCAN: Every minute, scan last ~5 minutes of blocks
-        
-        This catches:
-        - Brand new wallets making their first trades
-        - Existing whales making new trades
-        - Rapid changes in performance
+        One-time deep scan at startup (only if no existing data)
+        Scans 50K blocks and stores to database
         """
-        
-        while True:
-            try:
-                await asyncio.sleep(self.light_scan_interval)
-                
-                current_block = self.analyzer.w3.eth.block_number
-                
-                # Scan last 200 blocks (~5 minutes on Polygon)
-                from_block = max(
-                    self.last_light_scan_block,
-                    current_block - 200
-                )
-                
-                if from_block >= current_block:
-                    continue
-                
-                print(f"\n⚡ Light scan: blocks {from_block} → {current_block}")
-                
-                # Quick scan
-                new_whales = await self.quick_scan(from_block, current_block)
-                
-                if new_whales:
-                    print(f"   🆕 Found {len(new_whales)} new/updated whales")
-                    await self.update_pool()
-                
-                self.last_light_scan_block = current_block
-                
-            except Exception as e:
-                print(f"   ❌ Light scan error: {e}")
-                await asyncio.sleep(10)
-    
-    async def deep_scan_loop(self):
-        """
-        DEEP SCAN: Every hour, scan last week
-        
-        This catches:
-        - Historical performance
-        - Consistency over time
-        - Whales we might have missed
-        """
-        
-        while True:
-            try:
-                await asyncio.sleep(self.deep_scan_interval)
-                await self.deep_scan()
-                
-            except Exception as e:
-                print(f"   ❌ Deep scan error: {e}")
-                await asyncio.sleep(300)
-    
-    async def quick_scan(self, from_block, to_block):
-        """
-        Quick scan of recent blocks
-        Focus on speed over completeness
-        """
-        
-        try:
-            # Get OrderFilled events
-            events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
-                from_block=from_block,
-                to_block=to_block
-            )
-            
-            if not events:
-                return []
-            
-            # Group by trader
-            trader_activity = defaultdict(list)
-            
-            for event in events:
-                maker = event['args']['maker']
-                taker = event['args']['taker']
-                
-                trader_activity[maker].append(event)
-                trader_activity[taker].append(event)
-            
-            # Quick analysis
-            new_whales = []
-            
-            for trader, trades in trader_activity.items():
-                if len(trades) < 2:  # Need at least 2 trades to analyze
-                    continue
-                
-                # Quick metrics
-                trade_count = len(trades)
-                
-                # Estimate win rate (simplified)
-                # In real version, would check resolutions
-                estimated_win_rate = 0.65  # Placeholder
-                
-                # If new or significantly active, add/update
-                if trader not in self.whale_database or trade_count >= 5:
-                    
-                    self.whale_database[trader] = {
-                        'address': trader,
-                        'last_seen': datetime.now(),
-                        'recent_trade_count': trade_count,
-                        'estimated_win_rate': estimated_win_rate,
-                        'discovery_time': self.whale_database.get(trader, {}).get('discovery_time', datetime.now()),
-                        'total_scans_seen': self.whale_database.get(trader, {}).get('total_scans_seen', 0) + 1
-                    }
-                    
-                    new_whales.append(trader)
-            
-            return new_whales
-            
-        except Exception as e:
-            print(f"      Error in quick scan: {e}")
-            return []
-    
-    async def deep_scan(self):
-        """
-        Deep scan of last week
-        Full analysis with historical data
-        """
-        
+
         print("\n" + "="*80)
-        print(f"🔍 DEEP SCAN - {datetime.now().strftime('%H:%M:%S')}")
+        print(f"🔍 INITIAL DEEP SCAN (one-time)")
         print("="*80)
-        
-        # Full analysis
-        specialists = self.analyzer.find_fifteen_minute_specialists(
-            blocks_to_scan=50000
-        )
-        
-        # Update database
-        for whale in specialists:
+        print("This builds the initial trade database...")
+        print("Subsequent runs will only scan NEW blocks.\n")
+
+        current_block = self.analyzer.w3.eth.block_number
+        start_block = current_block - 50000
+
+        # Get events in chunks and store to database
+        events = self.analyzer._get_events_in_chunks(start_block, current_block)
+
+        print(f"\nStoring {len(events):,} trades to database...")
+        added = self.db.add_trades_from_events(events)
+        self.db.set_last_scanned_block(current_block)
+
+        print(f"✅ Stored {added:,} trades")
+
+        # Analyze and build whale pool
+        await self.refresh_pool_from_database()
+
+    async def load_from_database(self):
+        """Load existing whale data from database"""
+
+        print("\n📂 Loading whale stats from database...")
+
+        whales = self.db.get_top_whales(limit=100)
+
+        for whale in whales:
             address = whale['address']
-            
+            self.whale_database[address] = {
+                'address': address,
+                'trade_count': whale['trade_count'],
+                'estimated_profit': whale['estimated_profit'],
+                'estimated_win_rate': whale['win_rate'],
+                'wins': whale['wins'],
+                'losses': whale['losses'],
+                'total_volume': whale['total_volume'],
+                'last_seen': datetime.now(),  # Will be updated by scans
+                'discovery_time': datetime.now()
+            }
+
+        print(f"   Loaded {len(whales)} whales from cache")
+
+        # Build initial pool
+        await self.update_pool()
+
+    async def incremental_scan_loop(self):
+        """
+        INCREMENTAL SCAN: Only scan NEW blocks
+
+        This is the key optimization:
+        - Get last scanned block from database
+        - Only fetch blocks after that
+        - Append new trades to database
+        - Never re-scan old blocks
+        """
+
+        while True:
+            try:
+                await asyncio.sleep(self.scan_interval)
+
+                current_block = self.analyzer.w3.eth.block_number
+                last_scanned = self.db.get_last_scanned_block() or (current_block - 50)
+
+                # Only scan new blocks
+                from_block = last_scanned + 1
+
+                if from_block >= current_block:
+                    continue  # No new blocks
+
+                blocks_to_scan = current_block - from_block
+                print(f"\n⚡ Incremental scan: {blocks_to_scan} new blocks ({from_block} → {current_block})")
+
+                # Fetch new events
+                try:
+                    events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
+                        from_block=from_block,
+                        to_block=current_block
+                    )
+                except Exception as e:
+                    print(f"   ⚠️ Error fetching events: {e}")
+                    await asyncio.sleep(10)
+                    continue
+
+                if events:
+                    # Store to database
+                    added = self.db.add_trades_from_events(events)
+                    print(f"   📥 Stored {added} new trades")
+
+                    # Quick check for whale activity
+                    await self.check_whale_activity(events)
+
+                # Update last scanned block
+                self.db.set_last_scanned_block(current_block)
+
+            except Exception as e:
+                print(f"   ❌ Scan error: {e}")
+                await asyncio.sleep(10)
+
+    async def check_whale_activity(self, events):
+        """
+        Quick check if any monitored whales made trades
+
+        Updates whale_database with recent activity
+        """
+
+        monitored_addresses = set(w['address'] for w in self.monitoring_pool)
+
+        for event in events:
+            maker = event['args']['maker']
+            taker = event['args']['taker']
+
+            for address in [maker, taker]:
+                if address in monitored_addresses:
+                    # Update last seen
+                    if address in self.whale_database:
+                        self.whale_database[address]['last_seen'] = datetime.now()
+                        self.whale_database[address]['recent_trade_count'] = \
+                            self.whale_database[address].get('recent_trade_count', 0) + 1
+                        print(f"   🐋 Whale active: {address[:10]}...")
+
+    async def pool_refresh_loop(self):
+        """
+        POOL REFRESH: Uses database, NOT blockchain
+
+        This is instant because it queries SQLite, not the RPC
+        Old version: Re-scanned 50K blocks every hour
+        New version: Queries database in <1 second
+        """
+
+        while True:
+            await asyncio.sleep(self.pool_refresh_interval)
+            await self.refresh_pool_from_database()
+
+    async def refresh_pool_from_database(self):
+        """
+        Refresh whale pool from stored database
+
+        NO BLOCKCHAIN SCANNING - just queries SQLite
+        """
+
+        print("\n" + "="*80)
+        print(f"🔄 POOL REFRESH (from database) - {datetime.now().strftime('%H:%M:%S')}")
+        print("="*80)
+
+        # Analyze all trades in database
+        specialists = self.db.analyze_and_cache_traders()
+
+        # Update whale database
+        for whale in specialists[:100]:  # Top 100
+            address = whale['address']
+
             if address not in self.whale_database:
                 self.whale_database[address] = {
                     'discovery_time': datetime.now(),
-                    'total_scans_seen': 1
+                    'last_seen': datetime.now()
                 }
-            
+
             self.whale_database[address].update({
                 'address': address,
-                'last_deep_scan': datetime.now(),
                 'trade_count': whale['trade_count'],
                 'estimated_profit': whale['estimated_profit'],
-                'estimated_win_rate': whale['estimated_win_rate'],
-                'markets_traded': whale['markets_traded'],
-                'speed_score': whale['speed_score']
+                'estimated_win_rate': whale['win_rate'],
+                'wins': whale['wins'],
+                'losses': whale['losses'],
+                'total_volume': whale['total_volume']
             })
-        
-        print(f"   ✅ Deep scan complete: {len(self.whale_database)} total whales")
-        
+
+        print(f"   ✅ Analyzed {len(specialists)} traders from database")
+
         await self.update_pool()
-    
+
+        # Export whale stats
+        self.db.export_to_csv('whale_specialists.csv')
+
+    async def prune_loop(self):
+        """
+        PRUNE: Remove old data to keep database manageable
+
+        Keeps last 50K blocks (rolling window)
+        """
+
+        while True:
+            await asyncio.sleep(self.prune_interval)
+
+            deleted = self.db.prune_old_blocks(keep_blocks=50000)
+            if deleted > 0:
+                print(f"\n🗑️ Pruned {deleted:,} old trades (keeping last 50K blocks)")
+
     async def update_pool(self):
         """
         Update monitoring pool based on latest data
-        
-        With $100 capital, we want:
-        - Top 20-30 whales (not 50, capital too small)
-        - Emphasis on RECENT performance (last hour matters more)
-        - Rising stars (new hot hands)
         """
-        
+
         ranked = []
-        
+
         for address, data in self.whale_database.items():
-            # Calculate score
             score = 0
-            
-            # Factor 1: Recent activity (50% weight) - CRITICAL for $100
+
+            # Factor 1: Recent activity (50% weight)
             last_seen = data.get('last_seen', datetime.min)
             minutes_ago = (datetime.now() - last_seen).total_seconds() / 60
-            
+
             if minutes_ago < 5:
                 score += 50  # Active RIGHT NOW
             elif minutes_ago < 60:
                 score += 40 * (1 - minutes_ago/60)
-            elif minutes_ago < 1440:  # 24 hours
+            elif minutes_ago < 1440:
                 score += 20 * (1 - minutes_ago/1440)
-            
+
             # Factor 2: Win rate (30% weight)
             win_rate = data.get('estimated_win_rate', 0.5)
-            score += (win_rate - 0.5) * 30
-            
-            # Factor 3: Trade frequency (20% weight)
-            recent_count = data.get('recent_trade_count', 0)
-            score += min(recent_count * 2, 20)
-            
+            score += (win_rate - 0.5) * 60  # -30 to +30
+
+            # Factor 3: Profit (20% weight)
+            profit = data.get('estimated_profit', 0)
+            score += min(profit / 100, 20)  # Cap at 20 points
+
             ranked.append({
                 'address': address,
                 'score': score,
                 **data
             })
-        
-        # Sort by score
+
         ranked.sort(key=lambda x: x['score'], reverse=True)
-        
-        # For $100 capital, monitor top 25 (not 50)
-        # Smaller pool = less capital spread = bigger positions
-        old_pool = set([w['address'] for w in self.monitoring_pool])
+
+        old_pool = set(w['address'] for w in self.monitoring_pool)
         new_pool = ranked[:25]
-        new_addresses = set([w['address'] for w in new_pool])
-        
+        new_addresses = set(w['address'] for w in new_pool)
+
         added = new_addresses - old_pool
         removed = old_pool - new_addresses
-        
+
         self.monitoring_pool = new_pool
-        
+
         if added or removed:
             print(f"\n   🔄 Pool updated: {len(new_pool)} whales")
             if added:
                 print(f"      📈 Added {len(added)}")
-                for addr in list(added)[:3]:
-                    print(f"         {addr[:10]}...")
             if removed:
                 print(f"      📉 Removed {len(removed)}")
-        
-        # Export
+
         self.export_state()
-    
+
     def export_state(self):
         """Export current state"""
-        
+
         # Monitoring pool
-        df = pd.DataFrame(self.monitoring_pool)
-        df.to_csv('ultra_fast_pool.csv', index=False)
-        
-        # Just addresses
+        if self.monitoring_pool:
+            df = pd.DataFrame(self.monitoring_pool)
+            df.to_csv('ultra_fast_pool.csv', index=False)
+
+        # Addresses
         addresses = [w['address'] for w in self.monitoring_pool]
         with open('ultra_fast_addresses.txt', 'w') as f:
             f.write('\n'.join(addresses))
-        
+
         # Stats
+        db_stats = self.db.get_database_stats()
         stats = {
             'timestamp': datetime.now().isoformat(),
             'total_whales': len(self.whale_database),
             'monitoring': len(self.monitoring_pool),
-            'active_last_5min': sum(1 for w in self.whale_database.values() 
-                                    if (datetime.now() - w.get('last_seen', datetime.min)).total_seconds() < 300)
+            'database_trades': db_stats['trade_count'],
+            'database_blocks': db_stats['block_range'],
+            'last_scanned_block': db_stats['last_scanned']
         }
-        
+
         with open('ultra_fast_stats.json', 'w') as f:
             json.dump(stats, f, indent=2)
-    
+
     async def print_stats_loop(self):
         """Print stats every 2 minutes"""
-        
+
         while True:
-            await asyncio.sleep(120)  # Every 2 minutes
-            
+            await asyncio.sleep(120)
+
+            db_stats = self.db.get_database_stats()
+
             print("\n" + "-"*80)
             print(f"📊 STATS - {datetime.now().strftime('%H:%M:%S')}")
             print("-"*80)
-            print(f"🗄️  Total whales: {len(self.whale_database)}")
+            print(f"🗄️  Database: {db_stats['trade_count']:,} trades, {db_stats['block_range']:,} blocks")
+            print(f"🐋 Total whales: {len(self.whale_database)}")
             print(f"👀 Monitoring: {len(self.monitoring_pool)}")
-            
-            active_5min = sum(1 for w in self.whale_database.values() 
-                            if (datetime.now() - w.get('last_seen', datetime.min)).total_seconds() < 300)
-            print(f"🔥 Active (last 5 min): {active_5min}")
-            
+
             # Show top 5
             print(f"\n🏆 TOP 5:")
             for i, w in enumerate(self.monitoring_pool[:5], 1):
-                mins_ago = (datetime.now() - w.get('last_seen', datetime.now())).total_seconds() / 60
-                print(f"   #{i} {w['address'][:10]}... (Score: {w['score']:.1f}, {mins_ago:.0f}m ago)")
-            
+                profit = w.get('estimated_profit', 0)
+                win_rate = w.get('estimated_win_rate', 0) * 100
+                print(f"   #{i} {w['address'][:10]}... (${profit:,.0f} profit, {win_rate:.0f}% WR)")
+
             print("-"*80 + "\n")
-    
+
     def get_monitoring_addresses(self):
         """Get addresses for monitor"""
         return [w['address'] for w in self.monitoring_pool]
 
+    async def deep_scan(self):
+        """
+        Compatibility method - now just refreshes from database
+        Called by small_capital_system.py
+        """
+        await self.refresh_pool_from_database()
+
 
 async def main():
-    """Run ultra-fast discovery"""
-    
+    """Run optimized discovery"""
+
     print("="*80)
-    print("⚡ ULTRA-FAST DISCOVERY SYSTEM")
-    print("="*80)
-    print()
-    print("Optimized for $100 starting capital")
-    print()
-    print("Strategy:")
-    print("  • Scan every MINUTE for new whales")
-    print("  • Monitor top 25 (not 50, capital too small)")
-    print("  • Prioritize RECENT activity")
-    print("  • Catch rising stars instantly")
-    print()
-    print("Goal: Maximum opportunities with minimal capital")
+    print("⚡ ULTRA-FAST DISCOVERY v2 (Optimized)")
     print("="*80)
     print()
-    
+    print("Key improvements over v1:")
+    print("  • SQLite storage - no more re-scanning")
+    print("  • Incremental only - just new blocks")
+    print("  • 94% fewer RPC calls")
+    print("  • Instant pool refresh")
+    print()
+    print("="*80)
+    print()
+
     discovery = UltraFastDiscovery()
     await discovery.run_ultra_fast_discovery()
 
