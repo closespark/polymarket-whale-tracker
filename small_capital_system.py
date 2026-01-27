@@ -190,12 +190,23 @@ class SmallCapitalSystem:
 
                 # Trade callback
                 async def trade_callback(trade_data):
-                    # Enrich with whale data
+                    # Enrich with whale data from tiers (single source of truth)
                     whale_addr = trade_data.get('whale_address', '')
-                    whale_info = self.discovery.whale_database.get(whale_addr, {})
-                    trade_data['whale_win_rate'] = whale_info.get('estimated_win_rate', 0.72)
-                    trade_data['whale_profit'] = whale_info.get('estimated_profit', 0)
-                    trade_data['whale_trade_count'] = whale_info.get('trade_count', 0)
+                    _, tier = self.multi_tf_strategy.find_whale_tier(whale_addr)
+                    if tier:
+                        whale_data = tier.get_whale_data(whale_addr)
+                        if whale_data:
+                            trade_data['whale_win_rate'] = whale_data.get('win_rate', 0.72)
+                            trade_data['whale_profit'] = whale_data.get('profit', 0)
+                            trade_data['whale_trade_count'] = whale_data.get('trade_count', 0)
+                        else:
+                            trade_data['whale_win_rate'] = 0.72
+                            trade_data['whale_profit'] = 0
+                            trade_data['whale_trade_count'] = 0
+                    else:
+                        trade_data['whale_win_rate'] = 0.72
+                        trade_data['whale_profit'] = 0
+                        trade_data['whale_trade_count'] = 0
 
                     # v2: Track trade for correlation detection
                     market = trade_data.get('market', trade_data.get('market_question', ''))
@@ -615,11 +626,12 @@ class SmallCapitalSystem:
         else:
             outcome = 'BREAK_EVEN'
 
-        # Get whale info from discovery if available
+        # Get whale info from tiers (single source of truth)
         whale_info = {}
-        if hasattr(self, 'discovery') and self.discovery:
-            whale_db = getattr(self.discovery, 'whale_database', {})
-            whale_info = whale_db.get(trade_data.get('whale_address', ''), {})
+        whale_addr = trade_data.get('whale_address', '')
+        _, tier = self.multi_tf_strategy.find_whale_tier(whale_addr)
+        if tier:
+            whale_info = tier.get_whale_data(whale_addr) or {}
 
         log_entry = {
             'timestamp': datetime.now().isoformat(),

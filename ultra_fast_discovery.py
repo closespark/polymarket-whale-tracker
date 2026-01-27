@@ -80,9 +80,7 @@ class UltraFastDiscovery:
             print(f"   Trades: {stats['trade_count']:,}")
             print(f"   Block range: {stats['oldest_block']:,} → {stats['newest_block']:,}")
             print(f"   Coverage: {stats['block_range']:,} blocks")
-
-            # Load cached whale stats
-            await self.load_from_database()
+            # Whale tiers are populated separately from database analysis
         else:
             # Skip deep scan on Render (memory constrained)
             # Instead, build up data via incremental scans
@@ -133,32 +131,6 @@ class UltraFastDiscovery:
 
         # Analyze and build whale pool
         await self.refresh_pool_from_database()
-
-    async def load_from_database(self):
-        """Load existing whale data from database"""
-
-        print("\n📂 Loading whale stats from database...")
-
-        whales = self.db.get_top_whales(limit=100)
-
-        for whale in whales:
-            address = whale['address']
-            self.whale_database[address] = {
-                'address': address,
-                'trade_count': whale['trade_count'],
-                'estimated_profit': whale['estimated_profit'],
-                'estimated_win_rate': whale['win_rate'],
-                'wins': whale['wins'],
-                'losses': whale['losses'],
-                'total_volume': whale['total_volume'],
-                'last_seen': datetime.now(),  # Will be updated by scans
-                'discovery_time': datetime.now()
-            }
-
-        print(f"   Loaded {len(whales)} whales from cache")
-
-        # Build initial pool
-        await self.update_pool()
 
     async def incremental_scan_loop(self):
         """
