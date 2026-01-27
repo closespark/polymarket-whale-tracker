@@ -44,7 +44,8 @@ class WhaleTimeframeTier:
 
     def add_whale(self, whale_data: Dict):
         """Add a whale specialist to this tier"""
-        if len(self.whales) < self.max_whales:
+        # max_whales=None means unlimited
+        if self.max_whales is None or len(self.whales) < self.max_whales:
             self.whales.append(whale_data)
 
     def is_whale_in_tier(self, address: str) -> bool:
@@ -442,7 +443,8 @@ class MultiTimeframeStrategy:
                 tier = self.tiers[tf_name]
 
                 for trader in traders:
-                    if len(tier.whales) >= tier.max_whales:
+                    # max_whales=None means unlimited
+                    if tier.max_whales is not None and len(tier.whales) >= tier.max_whales:
                         break
 
                     whale_data = {
@@ -490,7 +492,8 @@ class MultiTimeframeStrategy:
             win_rate = (wins / total * 100) if total > 0 else 0
 
             lines.append(f"\n{tier.name}:")
-            lines.append(f"   Whales: {len(tier.whales)}/{tier.max_whales}")
+            max_str = str(tier.max_whales) if tier.max_whales is not None else "unlimited"
+            lines.append(f"   Whales: {len(tier.whales)}/{max_str}")
             lines.append(f"   Trades: {total}")
             lines.append(f"   Win rate: {win_rate:.1f}%")
             lines.append(f"   Profit: ${profit:.2f}")
@@ -654,4 +657,4 @@ if __name__ == "__main__":
         print(f"   Base threshold: {tier.base_threshold}%")
         print(f"   Position multiplier: {tier.position_multiplier}x")
         print(f"   Min win rate: {tier.min_win_rate*100:.0f}%")
-        print(f"   Max whales: {tier.max_whales}")
+        print(f"   Max whales: {tier.max_whales if tier.max_whales is not None else 'unlimited'}")
