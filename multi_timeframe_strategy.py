@@ -321,9 +321,19 @@ class MultiTimeframeStrategy:
 
             # Check if we have any data
             total = sum(len(t) for t in tiers_data.values())
-            if total == 0 or total <= 1:
-                # Need to run analysis first (or re-run if only 1 specialist found)
-                print("   Running multi-timeframe analysis...")
+
+            # Force re-analysis if:
+            # - No data (total == 0)
+            # - Very few specialists (total <= 1)
+            # - Exactly 100 whales (old artificial limit - need to re-analyze with no limits)
+            needs_reanalysis = (total == 0 or total <= 1 or total == 100)
+
+            if needs_reanalysis:
+                if total == 100:
+                    print("   Cached tier data appears limited (100 whales) - clearing and re-analyzing...")
+                    db.clear_timeframe_cache()
+                else:
+                    print("   Running multi-timeframe analysis...")
 
                 # Fetch market metadata if needed (queries Polymarket API)
                 print("   Fetching market metadata from Polymarket Gamma API...")

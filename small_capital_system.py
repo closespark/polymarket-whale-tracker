@@ -9,6 +9,7 @@ Enhancements:
 5. Incremental-only blockchain scanning
 6. Trade aggregation (filters arbitrage/hedging)
 7. Pending position tracking (profit counted on market resolution)
+8. Market lifecycle tracking (real resolution outcomes)
 """
 
 import asyncio
@@ -18,6 +19,7 @@ import os
 import random
 
 from aiohttp import web
+from market_lifecycle import get_market_lifecycle
 
 # Timeframe durations for market resolution
 TIMEFRAME_DURATIONS = {
@@ -36,17 +38,18 @@ class PendingPositionTracker:
     Instead of claiming instant profit, we:
     1. Record the position when we copy a trade
     2. Track the expected resolution time based on market timeframe
-    3. Simulate/resolve the position when the market closes
+    3. Check actual market resolution via Gamma API
     4. Only then update capital and stats
 
-    In dry run mode: Simulates resolution based on whale's historical win rate
-    In live mode: Would check actual market resolution via Polymarket API
+    Resolution uses ACTUAL market outcomes from MarketLifecycle tracker.
+    Falls back to simulation only if API doesn't return outcome.
     """
 
     def __init__(self, system):
         self.system = system
         self.pending_positions = []  # List of pending position dicts
         self.resolved_positions = []  # History of resolved positions
+        self.market_lifecycle = get_market_lifecycle()  # For actual resolutions
 
     def add_position(self, trade_data: dict, position_size: float, confidence: float):
         """
@@ -71,6 +74,7 @@ class PendingPositionTracker:
             'whale_win_rate': trade_data.get('whale_win_rate', 0.72),
             'side': trade_data.get('side', trade_data.get('net_side', 'BUY')),
             'market': trade_data.get('market_question', trade_data.get('market', 'Unknown')),
+            'token_id': trade_data.get('token_id', trade_data.get('asset_id', '')),
             'tier': trade_data.get('tier', 'unknown'),
             'trade_data': trade_data,
             'status': 'pending'
@@ -104,24 +108,48 @@ class PendingPositionTracker:
 
     async def _resolve_position(self, position: dict):
         """
-        Resolve a position (determine win/loss and update stats)
+        Resolve a position using ACTUAL market outcome from Gamma API.
 
-        In dry run: Uses whale win rate to simulate outcome
-        In live: Would check actual market resolution
+        Resolution priority:
+        1. Check MarketLifecycle for actual resolution (preferred)
+        2. Fall back to simulation if API unavailable
         """
         # Remove from pending
         self.pending_positions = [p for p in self.pending_positions if p['id'] != position['id']]
 
-        # Determine outcome
-        # In dry run, simulate based on whale's historical win rate
-        whale_win_rate = position['whale_win_rate']
-        confidence = position['confidence']
+        # Try to get ACTUAL market outcome
+        token_id = position.get('token_id', '')
+        actual_outcome = None
+        outcome_source = 'simulated'
 
-        # Adjust probability based on confidence (higher confidence = slightly better odds)
-        adjusted_win_prob = whale_win_rate * (0.9 + (confidence / 1000))  # Small confidence boost
-        adjusted_win_prob = min(adjusted_win_prob, 0.95)  # Cap at 95%
+        if token_id:
+            actual_outcome = self.market_lifecycle.get_resolution(token_id)
 
-        is_win = random.random() < adjusted_win_prob
+        if actual_outcome:
+            # Use actual market outcome
+            outcome_source = 'actual'
+            side = position.get('side', 'BUY')
+
+            # Determine if we won based on our side and market outcome
+            # If we bought YES and outcome is YES -> WIN
+            # If we bought NO and outcome is NO -> WIN
+            if side == 'BUY':
+                is_win = (actual_outcome == 'YES')
+            else:  # SELL
+                is_win = (actual_outcome == 'NO')
+
+            print(f"   📊 Using ACTUAL outcome: {actual_outcome} (side={side})")
+        else:
+            # Fall back to simulation based on whale's win rate
+            whale_win_rate = position['whale_win_rate']
+            confidence = position['confidence']
+
+            # Adjust probability based on confidence
+            adjusted_win_prob = whale_win_rate * (0.9 + (confidence / 1000))
+            adjusted_win_prob = min(adjusted_win_prob, 0.95)
+
+            is_win = random.random() < adjusted_win_prob
+            print(f"   ⚠️ No API outcome - using simulated (win_prob={adjusted_win_prob:.1%})")
 
         # Calculate profit/loss
         position_size = position['position_size']
