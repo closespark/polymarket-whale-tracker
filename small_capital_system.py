@@ -740,8 +740,10 @@ class SmallCapitalSystem:
             # Sort by win rate
             specialists.sort(key=lambda x: x['win_rate'], reverse=True)
 
-            # Populate tiers (for now, all go to 15-min tier)
-            self.multi_tf_strategy.populate_from_specialists(specialists)
+            # Try to populate from database (best), then file, then specialists
+            # Pass the database so it can analyze traders by timeframe
+            db = getattr(self.discovery, 'db', None)
+            self.multi_tf_strategy.populate_from_any_source(specialists, db=db)
 
             print(f"\n📊 MULTI-TIMEFRAME TIERS POPULATED:")
             for tier_name, tier in self.multi_tf_strategy.tiers.items():

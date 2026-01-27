@@ -7,10 +7,17 @@ Eliminates redundant deep scans by storing and querying historical data.
 import sqlite3
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
 from collections import defaultdict
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 
 def get_db_path() -> str:
@@ -86,6 +93,32 @@ class TradeDatabase:
                 first_block INTEGER,
                 last_block INTEGER,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create market metadata cache (for timeframe lookups)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_metadata (
+                token_id TEXT PRIMARY KEY,
+                timeframe TEXT DEFAULT 'unknown',
+                question TEXT,
+                fetched_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Create whale timeframe stats cache
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS whale_timeframe_stats (
+                address TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                trade_count INTEGER DEFAULT 0,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                volume REAL DEFAULT 0,
+                profit REAL DEFAULT 0,
+                win_rate REAL DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (address, timeframe)
             )
         """)
 
@@ -400,6 +433,293 @@ class TradeDatabase:
             writer.writerows(whales)
 
         print(f"Exported {len(whales)} whales to {filepath}")
+
+    # ========== MULTI-TIMEFRAME ANALYSIS ==========
+
+    def get_unique_tokens(self, limit: int = 5000) -> List[str]:
+        """Get unique asset IDs (token IDs) from trades"""
+        cursor = self.conn.execute("""
+            SELECT DISTINCT asset_id FROM trades
+            WHERE asset_id IS NOT NULL AND asset_id != ''
+            LIMIT ?
+        """, (limit,))
+        return [row[0] for row in cursor.fetchall()]
+
+    def get_cached_timeframe(self, token_id: str) -> Optional[str]:
+        """Get cached timeframe for a token"""
+        cursor = self.conn.execute(
+            "SELECT timeframe FROM market_metadata WHERE token_id = ?",
+            (token_id,)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def cache_token_timeframe(self, token_id: str, timeframe: str, question: str = ''):
+        """Cache a token's timeframe"""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO market_metadata (token_id, timeframe, question)
+            VALUES (?, ?, ?)
+        """, (token_id, timeframe, question))
+        self.conn.commit()
+
+    def _infer_timeframe_from_question(self, question: str) -> str:
+        """Infer market timeframe from question text"""
+        if not question:
+            return 'unknown'
+
+        q = question.lower()
+
+        # 15-minute patterns
+        if any(p in q for p in ['15 min', '15min', 'next 15', '15-min', 'fifteen min']):
+            return '15min'
+
+        # Hourly patterns (but not 4 hour)
+        if any(p in q for p in ['1 hour', '1hour', 'next hour', 'in an hour', '60 min', 'one hour']):
+            if '4' not in q:  # Avoid matching "4 hour"
+                return 'hourly'
+
+        # 4-hour patterns
+        if any(p in q for p in ['4 hour', '4hour', '4-hour', 'next 4', 'four hour']):
+            return '4hour'
+
+        # Daily patterns
+        if any(p in q for p in ['daily', 'by friday', 'by monday', 'by tomorrow',
+                                'end of day', 'eod', '24 hour', 'today', 'this week']):
+            return 'daily'
+
+        # Crypto price patterns are usually 15min
+        if any(p in q for p in ['btc', 'eth', 'sol', 'bitcoin', 'ethereum']):
+            if any(p in q for p in ['up', 'down', 'above', 'below', 'price']):
+                return '15min'
+
+        return 'daily'  # Default
+
+    def fetch_market_timeframes(self, max_tokens: int = 2000, batch_delay: float = 0.3):
+        """
+        Fetch market metadata from Polymarket API and cache timeframes
+
+        This runs once on startup, then uses cached data
+        """
+        if not HAS_REQUESTS:
+            print("   requests library not available, skipping API fetch")
+            return 0
+
+        tokens = self.get_unique_tokens(limit=max_tokens)
+
+        # Check how many we already have cached
+        cached_count = 0
+        uncached_tokens = []
+        for token in tokens:
+            if self.get_cached_timeframe(token):
+                cached_count += 1
+            else:
+                uncached_tokens.append(token)
+
+        if not uncached_tokens:
+            print(f"   All {cached_count} tokens already cached")
+            return cached_count
+
+        print(f"   {cached_count} cached, {len(uncached_tokens)} to fetch...")
+
+        fetched = 0
+        for i, token in enumerate(uncached_tokens[:500]):  # Limit to 500 new fetches per run
+            try:
+                # Try CLOB API
+                url = f"https://clob.polymarket.com/markets/{token}"
+                response = requests.get(url, timeout=5)
+
+                if response.status_code == 200:
+                    market = response.json()
+                    question = market.get('question', '') or market.get('title', '')
+                    timeframe = self._infer_timeframe_from_question(question)
+                    self.cache_token_timeframe(token, timeframe, question[:200])
+                    fetched += 1
+                else:
+                    # Mark as unknown so we don't retry
+                    self.cache_token_timeframe(token, 'unknown', '')
+
+                # Rate limit
+                if fetched % 20 == 0:
+                    time.sleep(batch_delay)
+
+                # Progress
+                if (i + 1) % 100 == 0:
+                    print(f"      Fetched {i+1}/{len(uncached_tokens[:500])} tokens...")
+
+            except Exception as e:
+                self.cache_token_timeframe(token, 'unknown', '')
+                continue
+
+        print(f"   Fetched {fetched} new market metadata entries")
+        return cached_count + fetched
+
+    def analyze_traders_by_timeframe(self) -> Dict[str, List[Dict]]:
+        """
+        Analyze all traders and group by their best-performing timeframe
+
+        Returns: Dict mapping timeframe -> list of qualified traders
+        """
+        print("Analyzing traders by timeframe...")
+
+        # Build token -> timeframe mapping from cache
+        cursor = self.conn.execute("SELECT token_id, timeframe FROM market_metadata")
+        token_timeframes = {row[0]: row[1] for row in cursor.fetchall()}
+
+        if not token_timeframes:
+            print("   No market metadata cached - run fetch_market_timeframes first")
+            return {}
+
+        # Build stats: address -> timeframe -> stats
+        trader_tf_stats = defaultdict(lambda: defaultdict(lambda: {
+            'trades': 0, 'wins': 0, 'losses': 0, 'volume': 0, 'profit': 0
+        }))
+
+        # Process all trades
+        cursor = self.conn.execute("""
+            SELECT maker, taker, maker_amount, taker_amount, asset_id
+            FROM trades WHERE asset_id IS NOT NULL AND asset_id != ''
+        """)
+
+        trade_count = 0
+        for row in cursor:
+            trade_count += 1
+            maker, taker, maker_amount, taker_amount, asset_id = row
+
+            timeframe = token_timeframes.get(asset_id, 'unknown')
+            if timeframe == 'unknown':
+                continue
+
+            usdc_amount = taker_amount / 1e6 if taker_amount else 0
+            token_amount = maker_amount / 1e6 if maker_amount else 1
+            price = usdc_amount / token_amount if token_amount > 0 else 0.5
+
+            # Update maker (SELL)
+            self._update_tf_stats(trader_tf_stats[maker.lower()][timeframe], 'SELL', price, usdc_amount)
+            # Update taker (BUY)
+            self._update_tf_stats(trader_tf_stats[taker.lower()][timeframe], 'BUY', price, usdc_amount)
+
+        print(f"   Processed {trade_count:,} trades")
+
+        # Assign traders to their best timeframe
+        tier_requirements = {
+            '15min': {'min_trades': 20, 'min_win_rate': 0.75},
+            'hourly': {'min_trades': 15, 'min_win_rate': 0.73},
+            '4hour': {'min_trades': 10, 'min_win_rate': 0.72},
+            'daily': {'min_trades': 10, 'min_win_rate': 0.70}
+        }
+
+        tiers = {'15min': [], 'hourly': [], '4hour': [], 'daily': []}
+
+        for address, tf_stats in trader_tf_stats.items():
+            best_tf = None
+            best_score = 0
+
+            for tf in ['15min', 'hourly', '4hour', 'daily']:
+                stats = tf_stats.get(tf, {'trades': 0})
+                trades = stats['trades']
+
+                req = tier_requirements.get(tf, {'min_trades': 10, 'min_win_rate': 0.70})
+                if trades < req['min_trades']:
+                    continue
+
+                total = stats['wins'] + stats['losses']
+                win_rate = stats['wins'] / total if total > 0 else 0
+                if win_rate < req['min_win_rate']:
+                    continue
+
+                # Score: win rate + profit factor
+                score = (win_rate * 0.6) + (min(stats['profit'] / 1000, 0.4))
+                if score > best_score:
+                    best_score = score
+                    best_tf = tf
+
+            if best_tf:
+                stats = tf_stats[best_tf]
+                total = stats['wins'] + stats['losses']
+                win_rate = stats['wins'] / total if total > 0 else 0
+
+                tiers[best_tf].append({
+                    'address': address,
+                    'specialty': best_tf,
+                    'trades': stats['trades'],
+                    'wins': stats['wins'],
+                    'win_rate': round(win_rate, 4),
+                    'volume': round(stats['volume'], 2),
+                    'profit': round(stats['profit'], 2),
+                    'score': round(best_score, 4)
+                })
+
+        # Sort each tier by score
+        for tf in tiers:
+            tiers[tf].sort(key=lambda x: x['score'], reverse=True)
+
+        # Cache results
+        self._cache_timeframe_stats(tiers)
+
+        # Print summary
+        print(f"\n   Multi-Timeframe Tier Results:")
+        for tf, traders in tiers.items():
+            print(f"      {tf}: {len(traders)} specialists")
+
+        return tiers
+
+    def _update_tf_stats(self, stats: Dict, side: str, price: float, volume: float):
+        """Update timeframe stats for a single trade"""
+        stats['trades'] += 1
+        stats['volume'] += volume
+
+        is_win = False
+        if side == 'BUY' and price < 0.45:
+            is_win = True
+        elif side == 'SELL' and price > 0.55:
+            is_win = True
+
+        if is_win:
+            stats['wins'] += 1
+            stats['profit'] += volume * 0.3
+        elif (side == 'BUY' and price > 0.75) or (side == 'SELL' and price < 0.25):
+            stats['losses'] += 1
+            stats['profit'] -= volume * 0.2
+
+    def _cache_timeframe_stats(self, tiers: Dict[str, List[Dict]]):
+        """Cache timeframe tier results to database"""
+        self.conn.execute("DELETE FROM whale_timeframe_stats")
+
+        for tf, traders in tiers.items():
+            for t in traders[:50]:  # Top 50 per tier
+                self.conn.execute("""
+                    INSERT INTO whale_timeframe_stats
+                    (address, timeframe, trade_count, wins, losses, volume, profit, win_rate)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (t['address'], tf, t['trades'], t['wins'],
+                      t['trades'] - t['wins'], t['volume'], t['profit'], t['win_rate']))
+
+        self.conn.commit()
+
+    def get_timeframe_tiers(self) -> Dict[str, List[Dict]]:
+        """Get cached timeframe tier assignments"""
+        tiers = {'15min': [], 'hourly': [], '4hour': [], 'daily': []}
+
+        cursor = self.conn.execute("""
+            SELECT address, timeframe, trade_count, wins, volume, profit, win_rate
+            FROM whale_timeframe_stats
+            ORDER BY profit DESC
+        """)
+
+        for row in cursor:
+            tf = row[1]
+            if tf in tiers:
+                tiers[tf].append({
+                    'address': row[0],
+                    'specialty': tf,
+                    'trades': row[2],
+                    'wins': row[3],
+                    'win_rate': row[6],
+                    'volume': row[4],
+                    'profit': row[5]
+                })
+
+        return tiers
 
     def close(self):
         """Close database connection"""

@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 import json
 import re
+import os
 
 
 class WhaleTimeframeTier:
@@ -299,6 +300,168 @@ class MultiTimeframeStrategy:
             self.tiers['15min'].add_whale(specialist)
 
         print(f"   Loaded {len(self.tiers['15min'].whales)} whales to 15-min tier")
+
+    def load_from_tier_file(self, tier_file: str = "timeframe_tiers.json") -> bool:
+        """
+        Load tier assignments from pre-analyzed JSON file
+
+        Args:
+            tier_file: Path to timeframe_tiers.json
+
+        Returns:
+            True if loaded successfully, False otherwise
+        """
+        # Check multiple locations
+        possible_paths = [
+            tier_file,
+            os.path.join(os.path.dirname(__file__), tier_file),
+            f"/var/data/{tier_file}",  # Render persistent disk
+            os.path.expanduser(f"~/{tier_file}")
+        ]
+
+        for path in possible_paths:
+            if os.path.exists(path):
+                tier_file = path
+                break
+        else:
+            print(f"   Tier file not found in any location")
+            return False
+
+        try:
+            with open(tier_file, 'r') as f:
+                data = json.load(f)
+
+            tiers_data = data.get('tiers', {})
+
+            total_loaded = 0
+            for tf_name, traders in tiers_data.items():
+                if tf_name not in self.tiers:
+                    continue
+
+                tier = self.tiers[tf_name]
+
+                for trader in traders:
+                    if len(tier.whales) >= tier.max_whales:
+                        break
+
+                    # Convert to expected format
+                    whale_data = {
+                        'address': trader.get('address', ''),
+                        'win_rate': trader.get('win_rate', 0.70),
+                        'trade_count': trader.get('trades', 0),
+                        'profit': trader.get('profit', 0),
+                        'timeframe_specialty': tf_name,
+                        'score': trader.get('score', 0),
+                        'all_timeframes': trader.get('all_timeframes', {})
+                    }
+                    tier.add_whale(whale_data)
+                    total_loaded += 1
+
+            print(f"   Loaded {total_loaded} traders from {tier_file}")
+            print(f"   Generated: {data.get('generated_at', 'unknown')}")
+
+            # Print tier breakdown
+            for tf_name, tier in self.tiers.items():
+                print(f"   {tier.name}: {len(tier.whales)} whales")
+
+            return True
+
+        except Exception as e:
+            print(f"   Error loading tier file: {e}")
+            return False
+
+    def populate_from_any_source(self, specialists: List[Dict] = None, db=None):
+        """
+        Try to populate tiers from best available source
+
+        Priority:
+        1. Database timeframe analysis (most accurate, auto-updates)
+        2. Pre-analyzed tier file (timeframe_tiers.json)
+        3. Specialist list (falls back to 15-min only)
+        """
+        # Try to load from database first (best option - analyzes on startup)
+        if db and self.load_from_database(db):
+            return True
+
+        # Try to load from pre-analyzed file
+        if self.load_from_tier_file():
+            return True
+
+        # Fall back to specialist list (15-min only)
+        if specialists:
+            print("   Falling back to specialist list (15-min tier only)")
+            self.populate_from_specialists(specialists)
+            return True
+
+        print("   No tier data available")
+        return False
+
+    def load_from_database(self, db) -> bool:
+        """
+        Load tier assignments from database timeframe analysis
+
+        This runs on startup and analyzes traders by their performance
+        in different market timeframes (15min, hourly, 4hour, daily).
+
+        Args:
+            db: TradeDatabase instance
+
+        Returns:
+            True if loaded successfully
+        """
+        try:
+            # First check if we have cached tiers
+            tiers_data = db.get_timeframe_tiers()
+
+            # Check if we have any data
+            total = sum(len(t) for t in tiers_data.values())
+            if total == 0:
+                # Need to run analysis first
+                print("   Running multi-timeframe analysis (first startup only)...")
+
+                # Fetch market metadata if needed (queries Polymarket API)
+                print("   Fetching market metadata from Polymarket API...")
+                db.fetch_market_timeframes(max_tokens=2000)
+
+                # Run the analysis
+                tiers_data = db.analyze_traders_by_timeframe()
+                total = sum(len(t) for t in tiers_data.values())
+
+            if total == 0:
+                print("   No timeframe specialists found in database")
+                return False
+
+            # Populate tiers
+            for tf_name, traders in tiers_data.items():
+                if tf_name not in self.tiers:
+                    continue
+
+                tier = self.tiers[tf_name]
+
+                for trader in traders:
+                    if len(tier.whales) >= tier.max_whales:
+                        break
+
+                    whale_data = {
+                        'address': trader.get('address', ''),
+                        'win_rate': trader.get('win_rate', 0.70),
+                        'trade_count': trader.get('trades', 0),
+                        'profit': trader.get('profit', 0),
+                        'timeframe_specialty': tf_name
+                    }
+                    tier.add_whale(whale_data)
+
+            print(f"   Loaded {total} specialists from database:")
+            for tf_name, tier in self.tiers.items():
+                print(f"      {tier.name}: {len(tier.whales)} whales")
+
+            return True
+
+        except Exception as e:
+            print(f"   Error loading from database: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def get_all_monitored_addresses(self) -> List[str]:
         """Get all whale addresses across all tiers"""

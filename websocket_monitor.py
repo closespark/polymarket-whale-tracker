@@ -50,7 +50,8 @@ class WebSocketTradeMonitor:
         if ws_url:
             self.ws_url = ws_url
         elif 'alchemy.com' in self.rpc_url:
-            self.ws_url = self.rpc_url.replace('https://', 'wss://').replace('/v2/', '/v2/ws/')
+            # Alchemy WebSocket: just replace https with wss (no /ws/ suffix)
+            self.ws_url = self.rpc_url.replace('https://', 'wss://')
         elif 'infura.io' in self.rpc_url:
             self.ws_url = self.rpc_url.replace('https://', 'wss://')
         else:
