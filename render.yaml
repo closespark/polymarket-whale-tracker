@@ -1,0 +1,43 @@
+# Render Blueprint - Polymarket Whale Tracker
+# Option 1: Single Background Worker (~$7/month)
+
+services:
+  # Main trading system as background worker
+  - type: worker
+    name: polymarket-whale-tracker
+    runtime: python
+    region: oregon  # Low latency to US-based RPCs
+    plan: starter   # $7/month - includes 512MB RAM, 0.5 CPU
+    buildCommand: pip install -r requirements.txt
+    startCommand: python small_capital_system.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: POLYGON_RPC_URL
+        sync: false  # Set manually in Render dashboard
+      - key: POLYMARKET_API_KEY
+        sync: false
+      - key: POLYMARKET_API_SECRET
+        sync: false
+      - key: POLYMARKET_API_PASSPHRASE
+        sync: false
+      - key: PRIVATE_KEY
+        sync: false
+      - key: WALLET_ADDRESS
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AUTO_COPY_ENABLED
+        value: "false"  # Start in dry run mode
+    autoDeploy: false  # Manual deploys for safety
+
+  # Optional: Web dashboard (uncomment if you want monitoring UI)
+  # - type: web
+  #   name: whale-tracker-dashboard
+  #   runtime: python
+  #   plan: free  # Free tier for dashboard
+  #   buildCommand: pip install -r requirements.txt
+  #   startCommand: gunicorn dashboard:app --bind 0.0.0.0:$PORT
+  #   envVars:
+  #     - key: PYTHON_VERSION
+  #       value: "3.11"

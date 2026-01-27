@@ -1,0 +1,35 @@
+# Secrets - NEVER commit these
+.env
+*.pem
+*_key.txt
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+
+# Data files (large, regeneratable)
+*.csv
+*.jsonl
+scan_progress.json
+trading_stats.json
+whale_database.json
+fifteen_min_specialists.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
