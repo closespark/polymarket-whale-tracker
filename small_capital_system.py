@@ -51,6 +51,10 @@ class PendingPositionTracker:
         self.resolved_positions = []  # History of resolved positions
         self.market_lifecycle = get_market_lifecycle()  # For actual resolutions
 
+        # Check if we should clear positions on startup
+        if os.environ.get('CLEAR_POSITIONS', 'false').lower() == 'true':
+            print("🧹 CLEAR_POSITIONS=true - starting with fresh position state")
+
     def add_position(self, trade_data: dict, position_size: float, confidence: float):
         """
         Add a new pending position
@@ -1473,15 +1477,18 @@ class SmallCapitalSystem:
                     print(f"      - {w.get('address', '')[:16]}...")
             print(f"   Total: {total_whales} unique whales for WebSocket monitoring")
 
-            # PRUNING DISABLED - too dangerous, can destroy trade history
-            # The prune was deleting trades based on cached tier data which had
-            # artificial limits, causing loss of the entire database.
-            #
-            # If you need to prune, do it manually with:
-            #   python -c "from trade_database import TradeDatabase; db = TradeDatabase(); db.prune_non_whale_trades([...addresses...])"
-            #
-            # stats_before = db.get_database_stats()
-            # print(f"   Database has {stats_before['trade_count']:,} trades (pruning disabled)")
+            # Prune non-whale trades to keep database manageable
+            # Only prune if we have a meaningful whale list (avoid the 100-whale cache bug)
+            if total_whales >= 500:
+                stats_before = db.get_database_stats()
+                print(f"\n🗑️  Pruning non-whale trades...")
+                print(f"   Database has {stats_before['trade_count']:,} trades before prune")
+                print(f"   Keeping trades from {total_whales} whales")
+                db.prune_non_whale_trades(whale_addresses)
+                stats_after = db.get_database_stats()
+                print(f"   Database has {stats_after['trade_count']:,} trades after prune")
+            else:
+                print(f"   Skipping prune - only {total_whales} whales detected (need 500+)")
 
         except Exception as e:
             print(f"⚠️ Error populating tiers: {e}")
