@@ -75,7 +75,7 @@ class MultiTimeframeStrategy:
     """
 
     def __init__(self):
-        # Define tiers
+        # Define tiers - no artificial limits, monitor all qualified whales
         self.tiers = {
             '15min': WhaleTimeframeTier(
                 name='Tier 1: 15-Min Specialists',
@@ -83,7 +83,7 @@ class MultiTimeframeStrategy:
                 base_threshold=88.0,
                 position_multiplier=1.2,
                 min_win_rate=0.75,
-                max_whales=15
+                max_whales=1000  # No practical limit
             ),
             'hourly': WhaleTimeframeTier(
                 name='Tier 2: Hourly Specialists',
@@ -91,7 +91,7 @@ class MultiTimeframeStrategy:
                 base_threshold=90.0,
                 position_multiplier=1.0,
                 min_win_rate=0.73,
-                max_whales=15
+                max_whales=1000  # No practical limit
             ),
             '4hour': WhaleTimeframeTier(
                 name='Tier 3: 4-Hour Specialists',
@@ -99,7 +99,7 @@ class MultiTimeframeStrategy:
                 base_threshold=92.0,
                 position_multiplier=0.8,
                 min_win_rate=0.72,
-                max_whales=10
+                max_whales=1000  # No practical limit
             ),
             'daily': WhaleTimeframeTier(
                 name='Tier 4: Daily Specialists',
@@ -107,7 +107,7 @@ class MultiTimeframeStrategy:
                 base_threshold=93.0,
                 position_multiplier=0.7,
                 min_win_rate=0.70,
-                max_whales=10
+                max_whales=1000  # No practical limit
             )
         }
 
@@ -355,11 +355,11 @@ class MultiTimeframeStrategy:
                     }
                     tier.add_whale(whale_data)
 
-            # Count actual loaded whales (after tier limits)
+            # Count actual loaded whales
             loaded_count = sum(len(tier.whales) for tier in self.tiers.values())
-            print(f"   Loaded {loaded_count} whales from {total} specialists found:")
+            print(f"   Loaded {loaded_count} qualified whales into tiers:")
             for tf_name, tier in self.tiers.items():
-                print(f"      {tier.name}: {len(tier.whales)}/{tier.max_whales} whales")
+                print(f"      {tier.name}: {len(tier.whales)} whales")
 
             return True
 
