@@ -3,14 +3,20 @@ WebSocket Real-Time Trade Monitor
 
 Sub-second whale detection using blockchain event subscriptions.
 
-Old approach: Poll every 60 seconds
-- Latency: 15-60 seconds
-- Miss trades that happen between polls
+ARCHITECTURE:
+- Subscribe to ALL OrderFilled events on CTF Exchange (single subscription)
+- When trade comes in, check if maker/taker is in our whale set
+- Set lookup is O(1), so we can monitor 1000+ whales with no slowdown
 
-New approach: WebSocket event stream
-- Latency: 2-5 seconds
-- Instant notification when whale trades
-- Better entry prices, less slippage
+Why this approach (vs per-whale subscriptions):
+- Polymarket doesn't support per-address event filtering
+- One subscription catches everything
+- Filtering locally is instant (hash set lookup)
+- Scales to unlimited whales
+
+Performance:
+- Old: Poll every 60 seconds, 15-60s latency, miss trades between polls
+- New: WebSocket stream, 2-5s latency, catch every trade
 """
 
 import asyncio

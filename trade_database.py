@@ -838,6 +838,7 @@ class TradeDatabase:
         tiers = {'15min': [], 'hourly': [], '4hour': [], 'daily': []}
 
         # Query qualified traders for each timeframe
+        # No LIMIT - we monitor ALL qualified whales since set lookup is O(1)
         for tf, req in tier_requirements.items():
             cursor = self.conn.execute("""
                 SELECT address, trades, wins, volume, profit,
@@ -847,7 +848,6 @@ class TradeDatabase:
                   AND trades >= ?
                   AND CAST(wins AS REAL) / trades >= ?
                 ORDER BY (CAST(wins AS REAL) / trades * 0.6) + (MIN(profit / 1000.0, 0.4)) DESC
-                LIMIT 200
             """, (tf, req['min_trades'], req['min_win_rate']))
 
             for row in cursor:
