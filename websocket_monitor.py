@@ -257,6 +257,9 @@ class WebSocketTradeMonitor:
                 maker_amount = int(data[128:192], 16)  # makerAmountFilled
                 taker_amount = int(data[192:256], 16)  # takerAmountFilled
 
+                # Calculate USDC value (taker_amount is in USDC with 6 decimals)
+                usdc_value = taker_amount / 1e6
+
                 trade_data = {
                     'whale_address': whale,
                     'side': side,
@@ -264,6 +267,7 @@ class WebSocketTradeMonitor:
                     'taker': taker,
                     'maker_amount': maker_amount,
                     'taker_amount': taker_amount,
+                    'usdc_value': usdc_value,
                     'price': taker_amount / maker_amount if maker_amount > 0 else 0,
                     'block_number': int(log_data['blockNumber'], 16),
                     'tx_hash': log_data['transactionHash'],
