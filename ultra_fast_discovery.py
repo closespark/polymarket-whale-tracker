@@ -172,6 +172,7 @@ class UltraFastDiscovery:
                         chunk_size = 1000  # Reduced from 2000
                         print(f"   Scanning in chunks (max {chunk_size} blocks each)...")
                         chunk_start = from_block
+                        chunks_processed = 0
                         while chunk_start < current_block:
                             chunk_end = min(chunk_start + chunk_size, current_block)
                             try:
@@ -184,12 +185,21 @@ class UltraFastDiscovery:
                                     added = self.db.add_trades_from_events(chunk_events)
                                     total_added += added
                                     del chunk_events  # Free memory immediately
+
+                                # Update last scanned block after each successful chunk
+                                self.db.set_last_scanned_block(chunk_end)
+                                chunks_processed += 1
+
+                                # Progress update every 5 chunks
+                                if chunks_processed % 5 == 0:
+                                    print(f"   📊 Progress: {chunk_end - from_block}/{blocks_to_scan} blocks, {total_added} trades")
+
                             except Exception as chunk_err:
-                                print(f"   ⚠️ Chunk error: {chunk_err}")
+                                print(f"   ⚠️ Chunk error at {chunk_start}-{chunk_end}: {chunk_err}")
                             chunk_start = chunk_end + 1
                             await asyncio.sleep(0.3)  # Rate limit
                         if total_added > 0:
-                            print(f"   📥 Stored {total_added} new trades (chunked)")
+                            print(f"   📥 Stored {total_added} new trades (chunked, {chunks_processed} chunks)")
                     else:
                         events = self.analyzer.ctf_exchange.events.OrderFilled.get_logs(
                             from_block=from_block,
@@ -199,13 +209,12 @@ class UltraFastDiscovery:
                             total_added = self.db.add_trades_from_events(events)
                             print(f"   📥 Stored {total_added} new trades")
                             del events  # Free memory
+                        # Update last scanned block
+                        self.db.set_last_scanned_block(current_block)
                 except Exception as e:
                     print(f"   ⚠️ Error fetching events: {e}")
                     await asyncio.sleep(10)
                     continue
-
-                # Update last scanned block
-                self.db.set_last_scanned_block(current_block)
 
             except Exception as e:
                 print(f"   ❌ Scan error: {e}")

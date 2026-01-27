@@ -103,32 +103,51 @@ class WhaleCopier:
     async def score_trade(self, trade_data):
         """
         Score whale trade using AI and historical data
-        
+
         Returns:
             Dict with confidence score and recommendation
         """
-        
-        # Base score from whale's historical performance
-        # (In production, would query database for whale stats)
-        base_score = 70.0
-        
+
+        # Base score from whale's actual historical performance
+        # Use whale_win_rate if available (set by WebSocket monitor from tier data)
+        whale_win_rate = trade_data.get('whale_win_rate', 0.70)
+        whale_trade_count = trade_data.get('whale_trade_count', 0)
+
+        # Convert win rate to base confidence (70% win rate = 70 base)
+        # But scale it: 70% → 80, 75% → 85, 80% → 90, 85% → 95
+        base_score = 50 + (whale_win_rate * 50)  # 70% → 85, 80% → 90
+
+        # Bonus for experienced whales
+        if whale_trade_count >= 50:
+            base_score += 5
+        elif whale_trade_count >= 100:
+            base_score += 8
+        elif whale_trade_count >= 200:
+            base_score += 10
+
         # Use Claude to analyze if available
         if self.claude and trade_data.get('market_question'):
             ai_analysis = await self._analyze_with_claude(trade_data)
             base_score = (base_score + ai_analysis['score']) / 2
-        
+
         # Adjust based on trade characteristics
-        
+
         # 1. Trade size (larger = higher conviction)
-        if trade_data['usdc_value'] > 500:
-            base_score += 10
-        elif trade_data['usdc_value'] < 100:
-            base_score -= 5
-        
+        usdc_value = trade_data.get('usdc_value', 0)
+        if usdc_value > 500:
+            base_score += 8
+        elif usdc_value > 100:
+            base_score += 4
+        elif usdc_value < 20:
+            base_score -= 5  # Very small trades are less reliable
+
         # 2. Price level (extreme prices = higher conviction)
-        if trade_data['price'] > 0.8 or trade_data['price'] < 0.2:
-            base_score += 5
-        
+        price = trade_data.get('price', 0.5)
+        if price > 0.85 or price < 0.15:
+            base_score += 5  # Strong conviction at extremes
+        elif price > 0.7 or price < 0.3:
+            base_score += 2
+
         # Cap score at 100
         confidence = min(base_score, 100.0)
         
