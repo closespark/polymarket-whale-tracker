@@ -146,9 +146,20 @@ class WebSocketTradeMonitor:
         print(f"   Contract: {self.ctf_address}")
         print(f"   Event sig: {event_signature[:20]}...")
 
+        reconnect_count = 0
         while self.running:
             try:
-                async with websockets.connect(self.ws_url) as ws:
+                reconnect_count += 1
+                if reconnect_count > 1:
+                    print(f"🔄 WebSocket reconnecting (attempt {reconnect_count})...")
+
+                async with websockets.connect(
+                    self.ws_url,
+                    open_timeout=30,
+                    close_timeout=10,
+                    ping_interval=20,
+                    ping_timeout=20
+                ) as ws:
                     # Subscribe
                     await ws.send(json.dumps(subscription_request))
                     response = await ws.recv()
@@ -182,14 +193,15 @@ class WebSocketTradeMonitor:
                             continue
 
             except websockets.exceptions.ConnectionClosed as e:
-                print(f"⚠️ WebSocket connection closed ({e}), reconnecting...")
+                print(f"⚠️ WebSocket connection closed ({e}), reconnecting in 5s...")
                 await asyncio.sleep(5)
 
             except Exception as e:
                 print(f"⚠️ WebSocket error: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
-                await asyncio.sleep(10)
+                # Exponential backoff for repeated failures
+                wait_time = min(10 * reconnect_count, 60)
+                print(f"   Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
 
     async def _process_log_event(self, log_data: dict):
         """Process a raw log event from WebSocket"""
