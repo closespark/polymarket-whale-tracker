@@ -18,7 +18,7 @@ from collections import defaultdict
 import pandas as pd
 import json
 
-from trade_database import TradeDatabase
+from trade_database import TradeDatabase, get_db_path
 from fifteen_minute_analyzer import FifteenMinuteWhaleAnalyzer
 import config
 
@@ -31,11 +31,14 @@ class UltraFastDiscovery:
     Pool refresh uses stored data - no blockchain re-scanning
     """
 
-    def __init__(self, db_path: str = "trades.db"):
+    def __init__(self, db_path: str = None):
         # Use lightweight analyzer for blockchain connection only
         self.analyzer = FifteenMinuteWhaleAnalyzer()
 
         # SQLite database for persistent storage
+        # Use environment variable DB_PATH for Render persistent disk
+        if db_path is None:
+            db_path = get_db_path()
         self.db = TradeDatabase(db_path, max_blocks=50000)
 
         self.whale_database = {}

@@ -1,5 +1,5 @@
 # Render Blueprint - Polymarket Whale Tracker
-# Option 1: Single Background Worker (~$7/month)
+# Background Worker with Persistent Disk (~$7/month + disk)
 
 services:
   # Main trading system as background worker
@@ -10,9 +10,15 @@ services:
     plan: starter   # $7/month - includes 512MB RAM, 0.5 CPU
     buildCommand: pip install -r requirements.txt
     startCommand: python small_capital_system.py
+    disk:
+      name: whale-tracker-data
+      mountPath: /data
+      sizeGB: 5  # 5GB disk (~$1/month) - enough for trades.db (1.6GB)
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
+      - key: DB_PATH
+        value: "/data/trades.db"  # Use persistent disk for database
       - key: POLYGON_RPC_URL
         sync: false  # Set manually in Render dashboard
       - key: POLYMARKET_API_KEY

@@ -1,101 +1,144 @@
-# Deploying to Render - Polymarket Whale Tracker
+# Deploying to Render - Polymarket Whale Tracker v2
 
-## Quick Start (Option 1: Background Worker - $7/month)
+## Quick Deploy with Persistent Disk (~$8/month)
 
-### 1. Prepare Your Repository
+### 1. Add Persistent Disk (Required for Database)
 
-```bash
-# Initialize git if not already done
-cd /Users/christabb/Downloads/files
-git init
-git add .
-git commit -m "Initial commit - Polymarket Whale Tracker"
-
-# Create GitHub repo and push
-gh repo create polymarket-whale-tracker --private --push
-```
-
-### 2. Connect to Render
-
-1. Go to [render.com](https://render.com) and sign up/login
-2. Click **New +** → **Background Worker**
-3. Connect your GitHub repo
+Go to your Render dashboard:
+1. Open https://dashboard.render.com/worker/srv-d5s3oqa4d50c73d2g6k0
+2. Click **Disks** in the left sidebar
+3. Click **Add Disk**
 4. Configure:
-   - **Name**: `polymarket-whale-tracker`
-   - **Region**: Oregon (or closest to you)
-   - **Branch**: `main`
-   - **Runtime**: Python 3
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `python small_capital_system.py`
-   - **Plan**: Starter ($7/month)
+   - **Name**: `whale-tracker-data`
+   - **Mount Path**: `/data`
+   - **Size**: 5 GB (~$1/month)
+5. Click **Save**
 
-### 3. Add Environment Variables
+### 2. Add Environment Variables
 
-In the Render dashboard, add these environment variables:
+Go to **Environment** tab and add/update:
 
-| Variable | Description |
-|----------|-------------|
-| `POLYGON_RPC_URL` | Your Polygon RPC (Alchemy/Infura) |
-| `POLYMARKET_API_KEY` | From Polymarket CLOB |
-| `POLYMARKET_API_SECRET` | From Polymarket CLOB |
-| `POLYMARKET_API_PASSPHRASE` | From Polymarket CLOB |
-| `PRIVATE_KEY` | Your wallet private key |
-| `WALLET_ADDRESS` | Your wallet address |
-| `AUTO_COPY_ENABLED` | `false` for dry run, `true` for live |
-| `ANTHROPIC_API_KEY` | Optional - Claude AI validation |
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `DB_PATH` | `/data/trades.db` | Database on persistent disk |
+| `POLYGON_RPC_URL` | Your URL | Alchemy/Infura Polygon RPC |
+| `AUTO_COPY_ENABLED` | `false` | Dry run mode (change to `true` for live) |
+| `ANTHROPIC_API_KEY` | (optional) | For Claude AI validation |
+| `POLYMARKET_API_KEY` | (for live) | From Polymarket CLOB |
+| `POLYMARKET_API_SECRET` | (for live) | From Polymarket CLOB |
+| `POLYMARKET_API_PASSPHRASE` | (for live) | From Polymarket CLOB |
+| `PRIVATE_KEY` | (for live) | Your wallet private key |
+| `WALLET_ADDRESS` | (for live) | Your wallet address |
 
-### 4. Deploy
+### 3. Deploy Latest Code
 
-Click **Create Background Worker** and Render will:
-- Build your application
-- Start the worker
-- Automatically restart on failures
-- Keep it running 24/7
+1. Go to **Deploys** tab
+2. Click **Manual Deploy** → **Deploy latest commit**
 
-## Monitoring
-
-### View Logs
+Or via API:
 ```bash
-# Install Render CLI
-brew install render
-
-# View live logs
-render logs --tail polymarket-whale-tracker
+curl -X POST "https://api.render.com/v1/services/srv-d5s3oqa4d50c73d2g6k0/deploys" \
+  -H "Authorization: Bearer rnd_3xPVMXfvXLY4UbR68mMkNKarVVS9" \
+  -H "Content-Type: application/json" \
+  -d '{"clearCache": false}'
 ```
 
-Or view logs in the Render dashboard under your service.
+### 4. Upload Pre-Scanned Database (Saves ~30 min)
 
-### Health Checks
+**Option A: Add SSH Key to Render**
+1. Go to Account Settings → SSH Keys
+2. Add your public key:
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+3. Copy and paste into Render
 
-The system writes `scan_progress.json` with current status. Check the logs for:
-- `Connected to Polygon: Block X` - Successful startup
-- `Found X specialists` - Scan complete
-- `Monitoring for trades...` - Active monitoring
+**Option B: Upload via SCP**
+```bash
+# From your local machine (after adding SSH key)
+scp trades.db srv-d5s3oqa4d50c73d2g6k0@ssh.oregon.render.com:/data/trades.db
+```
+
+**Option C: Let Render Scan Fresh**
+- Skip upload - system will do deep scan on first run
+- Takes ~30 minutes initially
+- After that, only incremental updates
+
+---
+
+## What's New in v2
+
+- **Kelly Criterion sizing**: Mathematically optimal position sizes
+- **WebSocket monitoring**: 2-5 second detection (vs 60 seconds)
+- **Risk management**: Trailing stops, exposure limits
+- **Whale intelligence**: Correlation, MM detection, specialization
+- **Multi-timeframe**: 15min, hourly, 4hr, daily tiers
+- **SQLite storage**: 94% fewer RPC calls
+
+---
 
 ## Cost Breakdown
 
 | Service | Plan | Cost |
 |---------|------|------|
 | Background Worker | Starter | $7/month |
-| **Total** | | **$7/month** |
+| Persistent Disk | 5 GB | $1/month |
+| **Total** | | **$8/month** |
 
-## Upgrading to Live Trading
+---
 
-1. In Render dashboard, go to Environment
-2. Change `AUTO_COPY_ENABLED` to `true`
-3. Render will auto-restart with live trading enabled
+## Monitoring
+
+### View Logs
+Check the Render dashboard → Logs tab
+
+Expected output:
+```
+💰 SMALL CAPITAL SYSTEM v2
+   Starting capital: $100
+   Kelly Criterion sizing: ENABLED
+   WebSocket monitoring: ENABLED
+   Risk management: ENABLED
+   Whale intelligence: ENABLED
+   Multi-timeframe: ENABLED
+
+⚡ ULTRA-FAST DISCOVERY v2 (Optimized)
+   Scan interval: Every 60s (new blocks only)
+   Pool refresh: Every 15min (from database)
+   Storage: SQLite (/data/trades.db)
+
+📊 Multi-Timeframe Strategy initialized
+   Tiers: ['15min', 'hourly', '4hour', 'daily']
+```
+
+---
 
 ## Troubleshooting
 
-### Worker keeps restarting
-- Check logs for errors
-- Verify all environment variables are set
-- Ensure RPC URL is valid and has credits
+**Issue: "No such file: /data/trades.db"**
+- Normal on first run if DB not uploaded
+- System will create new one and run deep scan (~30 min)
 
-### Missing trades
-- Increase `BLOCKS_TO_SCAN` in config
-- Check Polygon RPC rate limits
+**Issue: WebSocket connection fails**
+- Falls back to polling mode automatically
+- Ensure POLYGON_RPC_URL supports WebSockets
 
-### High latency
-- Use a faster RPC provider
-- Consider Oregon region for US markets
+**Issue: High memory during initial scan**
+- Deep scan loads events into memory
+- Will reduce after initial scan completes
+- Starter plan (512MB) is sufficient
+
+---
+
+## Upgrading to Live Trading
+
+1. Ensure you have:
+   - Polymarket API credentials
+   - Wallet with USDC on Polygon
+   - Private key configured
+
+2. In Render dashboard:
+   - Change `AUTO_COPY_ENABLED` to `true`
+   - Service auto-restarts with live trading
+
+⚠️ **Start with small amounts** - The system is in dry run mode by default for safety.

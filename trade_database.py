@@ -6,10 +6,16 @@ Eliminates redundant deep scans by storing and querying historical data.
 
 import sqlite3
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
 from collections import defaultdict
+
+
+def get_db_path() -> str:
+    """Get database path from environment or use default"""
+    return os.environ.get('DB_PATH', 'trades.db')
 
 
 class TradeDatabase:
