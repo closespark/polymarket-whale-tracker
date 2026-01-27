@@ -1473,25 +1473,15 @@ class SmallCapitalSystem:
                     print(f"      - {w.get('address', '')[:16]}...")
             print(f"   Total: {total_whales} unique whales for WebSocket monitoring")
 
-            # PRUNE NON-WHALE TRADES from database to save space
-            # This removes trades from addresses we don't care about
-            # BLOCKING: All other operations are paused until pruning completes
-            if whale_addresses:
-                stats_before = db.get_database_stats()
-                trade_count = stats_before['trade_count']
-
-                # Always attempt prune - let the database method decide if needed
-                print(f"\n🛑 SYSTEM PAUSED FOR DATABASE MAINTENANCE")
-                print(f"   All monitoring and discovery tasks will wait...")
-                print(f"   Current trade count: {trade_count:,}")
-
-                deleted = db.prune_non_whale_trades(whale_addresses)
-
-                if deleted > 0:
-                    stats_after = db.get_database_stats()
-                    print(f"   Kept {stats_after['trade_count']:,} whale trades")
-
-                print(f"✅ DATABASE MAINTENANCE COMPLETE - Resuming operations\n")
+            # PRUNING DISABLED - too dangerous, can destroy trade history
+            # The prune was deleting trades based on cached tier data which had
+            # artificial limits, causing loss of the entire database.
+            #
+            # If you need to prune, do it manually with:
+            #   python -c "from trade_database import TradeDatabase; db = TradeDatabase(); db.prune_non_whale_trades([...addresses...])"
+            #
+            # stats_before = db.get_database_stats()
+            # print(f"   Database has {stats_before['trade_count']:,} trades (pruning disabled)")
 
         except Exception as e:
             print(f"⚠️ Error populating tiers: {e}")
