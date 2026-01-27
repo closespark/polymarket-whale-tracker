@@ -263,7 +263,7 @@ class SmallCapitalSystem:
             )
 
             # Apply intelligence adjustments
-            confidence = intel_result['final_confidence']
+            confidence = intel_result.get('confidence', confidence)
 
             # Log intelligence findings
             if intel_result['adjustments']:

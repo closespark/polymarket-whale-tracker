@@ -292,14 +292,39 @@ class MultiTimeframeStrategy:
         """
         Populate tiers from specialist list
 
-        For now, puts all specialists in 15-min tier
-        Full implementation would analyze market patterns
+        Distributes whales across tiers when no timeframe data available.
+        Top performers go to 15-min tier (most aggressive), rest spread across other tiers.
         """
-        for specialist in specialists[:15]:  # Top 15 go to Tier 1
-            specialist['timeframe_specialty'] = '15min'
-            self.tiers['15min'].add_whale(specialist)
+        if not specialists:
+            print("   No specialists to load")
+            return
 
-        print(f"   Loaded {len(self.tiers['15min'].whales)} whales to 15-min tier")
+        # Sort by win rate
+        sorted_specialists = sorted(specialists, key=lambda x: x.get('win_rate', 0), reverse=True)
+
+        # Distribute across tiers: top 15 -> 15min, next 10 -> hourly, next 10 -> 4hour, next 10 -> daily
+        tier_limits = [
+            ('15min', 15),
+            ('hourly', 10),
+            ('4hour', 10),
+            ('daily', 10)
+        ]
+
+        idx = 0
+        for tier_name, limit in tier_limits:
+            tier = self.tiers[tier_name]
+            for specialist in sorted_specialists[idx:idx + limit]:
+                specialist['timeframe_specialty'] = tier_name
+                tier.add_whale(specialist)
+            idx += limit
+
+        # Print summary
+        total = 0
+        for tier_name, tier in self.tiers.items():
+            if tier.whales:
+                print(f"   {tier.name}: {len(tier.whales)} whales")
+                total += len(tier.whales)
+        print(f"   Total: {total} whales across all tiers")
 
     def load_from_tier_file(self, tier_file: str = "timeframe_tiers.json") -> bool:
         """
