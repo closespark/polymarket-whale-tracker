@@ -496,9 +496,10 @@ class TradeDatabase:
 
     def fetch_market_timeframes(self, max_tokens: int = 2000, batch_delay: float = 0.3):
         """
-        Fetch market metadata from Polymarket API and cache timeframes
+        Fetch market metadata from Polymarket Gamma API and cache timeframes
 
-        This runs once on startup, then uses cached data
+        Uses the Gamma API which supports direct token ID lookups via clob_token_ids parameter.
+        This runs once on startup, then uses cached data.
         """
         if not HAS_REQUESTS:
             print("   requests library not available, skipping API fetch")
@@ -519,57 +520,60 @@ class TradeDatabase:
 
         print(f"   {cached_count} cached, {len(uncached_tokens)} need metadata...")
 
-        # Fetch all markets from CLOB API and build token->question mapping
-        print(f"   Fetching markets from Polymarket CLOB API...")
+        # Use Gamma API with clob_token_ids parameter for direct lookup
+        # The API supports comma-separated token IDs for batch lookups
+        print(f"   Fetching from Polymarket Gamma API (batch token lookup)...")
 
         token_to_question = {}
-        next_cursor = None
-        page = 0
-        max_pages = 50  # Limit pages to avoid infinite loop
+        uncached_list = list(uncached_tokens)
+        batch_size = 20  # Query 20 tokens at a time (API supports multiple)
 
-        while page < max_pages:
+        for i in range(0, min(len(uncached_list), max_tokens), batch_size):
+            batch = uncached_list[i:i + batch_size]
+
             try:
-                url = "https://clob.polymarket.com/markets"
-                params = {"limit": 100}
-                if next_cursor:
-                    params["next_cursor"] = next_cursor
+                # Gamma API supports comma-separated clob_token_ids
+                token_ids_param = ','.join(batch)
+                url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_ids_param}"
+                response = requests.get(url, timeout=15)
 
-                response = requests.get(url, params=params, timeout=15)
+                if response.status_code == 200:
+                    markets = response.json()
+                    for market in markets:
+                        question = market.get('question', '')
+                        # Get token IDs from the market
+                        clob_token_ids = market.get('clobTokenIds', '[]')
+                        if isinstance(clob_token_ids, str):
+                            try:
+                                import json as json_module
+                                clob_token_ids = json_module.loads(clob_token_ids)
+                            except:
+                                clob_token_ids = []
 
-                if response.status_code != 200:
-                    print(f"   API returned {response.status_code}")
-                    break
-
-                data = response.json()
-                markets = data.get('data', data) if isinstance(data, dict) else data
-
-                if not markets:
-                    break
-
-                for market in markets:
-                    question = market.get('question', '')
-                    tokens = market.get('tokens', [])
-
-                    for token_data in tokens:
-                        token_id = str(token_data.get('token_id', ''))
-                        if token_id and token_id in uncached_tokens:
-                            token_to_question[token_id] = question
-
-                # Check for next page
-                next_cursor = data.get('next_cursor') if isinstance(data, dict) else None
-                page += 1
-
-                if page % 10 == 0:
-                    print(f"      Fetched {page} pages, found {len(token_to_question)} matching tokens...")
-
-                if not next_cursor:
-                    break
-
-                time.sleep(0.2)  # Rate limit
+                        # Map each token ID to the question
+                        for tid in clob_token_ids:
+                            tid_str = str(tid)
+                            if tid_str in uncached_tokens:
+                                token_to_question[tid_str] = question
 
             except Exception as e:
-                print(f"   API error: {e}")
-                break
+                # On error, try individual lookups for this batch
+                for token_id in batch:
+                    try:
+                        url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
+                        response = requests.get(url, timeout=10)
+                        if response.status_code == 200:
+                            markets = response.json()
+                            if markets:
+                                token_to_question[token_id] = markets[0].get('question', '')
+                    except:
+                        pass
+
+            # Progress update
+            if (i + batch_size) % 100 == 0:
+                print(f"      Checked {i + batch_size} tokens, found {len(token_to_question)} with metadata...")
+
+            time.sleep(batch_delay)  # Rate limit
 
         print(f"   Found metadata for {len(token_to_question)} tokens")
 
@@ -580,7 +584,7 @@ class TradeDatabase:
             self.cache_token_timeframe(token_id, timeframe, question[:200])
             fetched += 1
 
-        # Mark remaining as unknown so we don't retry them
+        # Mark remaining as unknown so we don't retry them repeatedly
         for token_id in uncached_tokens - set(token_to_question.keys()):
             self.cache_token_timeframe(token_id, 'unknown', '')
 
