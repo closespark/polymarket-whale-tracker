@@ -266,17 +266,20 @@ class SmallCapitalSystem:
             confidence = intel_result.get('confidence', confidence)
 
             # Log intelligence findings
-            if intel_result['adjustments']:
+            adjustments = intel_result.get('adjustments', [])
+            warnings = intel_result.get('warnings', [])
+
+            if adjustments:
                 print(f"\n🧠 Whale Intelligence:")
-                for adj in intel_result['adjustments']:
+                for adj in adjustments:
                     print(f"   {adj}")
 
-            if intel_result['warnings']:
-                print(f"   ⚠️ Warnings: {', '.join(intel_result['warnings'])}")
+            if warnings:
+                print(f"   ⚠️ Warnings: {', '.join(warnings)}")
 
             # Store intelligence data for analytics
-            trade_data['intel_adjustments'] = intel_result['adjustments']
-            trade_data['intel_warnings'] = intel_result['warnings']
+            trade_data['intel_adjustments'] = adjustments
+            trade_data['intel_warnings'] = warnings
             trade_data['whale_specialty'] = intel_result.get('specialty_match', False)
             trade_data['whale_consensus'] = intel_result.get('consensus_count', 0)
             trade_data['is_market_maker'] = intel_result.get('is_market_maker', False)
