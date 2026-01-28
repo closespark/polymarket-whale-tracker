@@ -155,12 +155,36 @@ class PendingPositionTracker:
             confidence: Confidence score used for this trade
         """
         market_timeframe = trade_data.get('market_timeframe', '15min')
-        resolution_delay = TIMEFRAME_DURATIONS.get(market_timeframe, timedelta(minutes=15))
+
+        # Use actual market end_date from Gamma API if available
+        # This is the REAL resolution time, not a calculated estimate
+        end_date_str = trade_data.get('end_date')
+        if end_date_str:
+            try:
+                # Parse ISO format from Gamma API
+                if isinstance(end_date_str, str):
+                    if 'T' in end_date_str:
+                        expected_resolution = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+                        # Convert to local time if timezone-aware
+                        if expected_resolution.tzinfo:
+                            expected_resolution = expected_resolution.replace(tzinfo=None)
+                    else:
+                        expected_resolution = datetime.strptime(end_date_str, '%Y-%m-%d %H:%M:%S')
+                else:
+                    expected_resolution = end_date_str  # Already a datetime
+            except (ValueError, TypeError):
+                # Fallback to calculated resolution
+                resolution_delay = TIMEFRAME_DURATIONS.get(market_timeframe, timedelta(minutes=15))
+                expected_resolution = datetime.now() + resolution_delay
+        else:
+            # Fallback: calculate from timeframe (less accurate)
+            resolution_delay = TIMEFRAME_DURATIONS.get(market_timeframe, timedelta(minutes=15))
+            expected_resolution = datetime.now() + resolution_delay
 
         position = {
             'id': f"{trade_data.get('whale_address', '')[:10]}_{datetime.now().timestamp()}",
             'opened_at': datetime.now(),
-            'expected_resolution': datetime.now() + resolution_delay,
+            'expected_resolution': expected_resolution,
             'market_timeframe': market_timeframe,
             'position_size': position_size,
             'confidence': confidence,
@@ -667,6 +691,12 @@ class SmallCapitalSystem:
                             trade_data['market'] = market_info.get('question', '')
                             timeframe_from_gamma = market_info.get('timeframe')
                             trade_data['timeframe'] = timeframe_from_gamma or 'unknown'
+                            # Still need to fetch end_date from Gamma (not cached)
+                            gamma_market_data = await self._fetch_gamma_market_with_retry(token_id)
+                            if gamma_market_data:
+                                end_date = gamma_market_data.get('endDate') or gamma_market_data.get('end_date')
+                                if end_date:
+                                    trade_data['end_date'] = end_date
                         else:
                             # Try to fetch from Gamma API on-demand with retry
                             gamma_market_data = await self._fetch_gamma_market_with_retry(token_id)
@@ -679,6 +709,11 @@ class SmallCapitalSystem:
                                     # v3: Extract timeframe from recurrence
                                     timeframe_from_gamma = self._extract_timeframe_from_gamma(gamma_market_data)
                                     trade_data['timeframe'] = timeframe_from_gamma or 'unknown'
+
+                                    # v4: Extract actual end_date for accurate resolution timing
+                                    end_date = gamma_market_data.get('endDate') or gamma_market_data.get('end_date')
+                                    if end_date:
+                                        trade_data['end_date'] = end_date
 
                                     # Cache with timeframe
                                     db.cache_token_timeframe(str(token_id), timeframe_from_gamma or 'unknown', question[:200])
