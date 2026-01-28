@@ -1008,6 +1008,24 @@ class TradeDatabase:
             'win_rate': (row[3] / row[2] * 100) if row[2] and row[2] > 0 else 0.0
         }
 
+    def get_best_trade_pnl(self) -> float:
+        """Get the maximum PnL from all resolved dry run positions (all-time best)."""
+        cursor = self.conn.execute("""
+            SELECT MAX(pnl) FROM dry_run_positions
+            WHERE status = 'RESOLVED' AND pnl IS NOT NULL
+        """)
+        row = cursor.fetchone()
+        return row[0] if row[0] is not None else 0.0
+
+    def get_worst_trade_pnl(self) -> float:
+        """Get the minimum PnL from all resolved dry run positions (all-time worst)."""
+        cursor = self.conn.execute("""
+            SELECT MIN(pnl) FROM dry_run_positions
+            WHERE status = 'RESOLVED' AND pnl IS NOT NULL
+        """)
+        row = cursor.fetchone()
+        return row[0] if row[0] is not None else 0.0
+
     def get_24h_committed_capital(self) -> dict:
         """
         Get the total capital committed in the last 24 hours for dry run mode.

@@ -14,6 +14,9 @@ This system monitors whale traders on Polymarket's CTF Exchange, analyzes their 
 - **Kelly Criterion position sizing** - Mathematically optimal bet sizing
 - **Claude AI validation** - Optional AI-powered trade analysis
 - **Whale intelligence** - Correlation detection, market maker filtering, consensus tracking
+- **Embedded web dashboard** - Real-time monitoring at port 8080
+- **Automatic whale management** - Hourly promotion/pruning based on performance
+- **Position persistence** - Trades survive restarts via SQLite
 
 ## Architecture
 
@@ -42,7 +45,18 @@ This system monitors whale traders on Polymarket's CTF Exchange, analyzes their 
 │  • SQLite storage (trades.db)                            ││
 │  • Trader analysis by timeframe                          │◄┘
 │  • Market metadata caching (Gamma API)                   │
-│  • Tier assignment                                       │
+│  • Tier assignment & whale management                    │
+│  • Dry run position tracking                             │
+└──────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌──────────────────────────────────────────────────────────┐
+│                    embedded_dashboard.py                  │
+│                                                          │
+│  • Real-time web dashboard (port 8080)                   │
+│  • Capital/ROI tracking (24h committed capital)          │
+│  • Whale observations analytics                          │
+│  • Pending/resolved position display                     │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -88,6 +102,24 @@ When a whale trades, the system runs:
 
 **Example**: A daily specialist (93% base) trading a 15-minute market (outside specialty) requires **99% confidence** to copy.
 
+### 5. Whale Management Loop
+
+The system automatically manages its whale roster every hour:
+
+1. **Promote top performers** - Whales from observations with 80%+ win rate and 5+ trades get promoted to active monitoring
+2. **Prune underperformers** - Active whales that drop below 80% win rate are removed
+3. **Reload tiers** - Memory is synced with database after changes
+
+## Update Intervals
+
+| Component | Interval | Purpose |
+|-----------|----------|---------|
+| Whale observation resolution | 60s | Track whale trade outcomes |
+| Tier promotion check | 30m | Check for whales ready to promote |
+| Whale management (prune/promote) | 60m | Hourly roster cleanup |
+| Position resolution | 30s | Check if pending positions resolved |
+| Dashboard refresh | 5s | Client-side auto-refresh |
+
 ## Installation
 
 ### Prerequisites
@@ -99,7 +131,7 @@ When a whale trades, the system runs:
 
 ```bash
 # Clone and install dependencies
-pip install web3 websockets python-dotenv requests pandas anthropic
+pip install web3 websockets python-dotenv requests pandas anthropic aiohttp
 
 # Create .env file
 cp .env.example .env
@@ -124,6 +156,15 @@ ANTHROPIC_API_KEY=your_anthropic_key
 # Whale discovery criteria
 MIN_WHALE_PROFIT=5000
 MIN_WHALE_WIN_RATE=0.60
+
+# Database path (default: trades.db)
+DB_PATH=trades.db
+
+# Clear positions on restart (default: false)
+CLEAR_POSITIONS=false
+
+# Maintenance mode (pauses system for DB uploads)
+MAINTENANCE_MODE=false
 ```
 
 ## Usage
@@ -146,6 +187,16 @@ python ultra_fast_discovery.py
 python websocket_monitor.py
 ```
 
+### Access the dashboard
+
+The embedded dashboard runs on port 8080. For remote servers:
+
+```bash
+# SSH tunnel from Render or similar
+ssh -L 8080:localhost:8080 srv-xxx@ssh.render.com
+# Then open http://localhost:8080 in browser
+```
+
 ## Key Files
 
 | File | Purpose |
@@ -154,20 +205,42 @@ python websocket_monitor.py
 | `ultra_fast_discovery.py` | Incremental blockchain scanning, SQLite storage |
 | `websocket_monitor.py` | Real-time WebSocket event subscriptions |
 | `multi_timeframe_strategy.py` | Tier system, threshold calculation |
-| `trade_database.py` | SQLite storage, timeframe analysis, Gamma API |
+| `trade_database.py` | SQLite storage, timeframe analysis, Gamma API, whale management |
+| `embedded_dashboard.py` | Real-time web dashboard (port 8080) |
 | `whale_intelligence.py` | Correlation detection, market maker filtering |
 | `kelly_sizing.py` | Kelly Criterion position sizing |
 | `risk_manager.py` | Drawdown limits, exposure management |
 | `claude_validator.py` | Claude AI trade validation (optional) |
+| `market_lifecycle.py` | Market resolution tracking via Gamma API |
+| `order_executor.py` | Live order execution (when AUTO_COPY_ENABLED=true) |
+| `position_manager.py` | Live position tracking |
+| `market_resolver.py` | Market outcome detection |
 | `config.py` | Configuration and contract ABIs |
 
 ## Database Schema
 
 The system uses SQLite (`trades.db`) with these key tables:
 
-- **trades** - All OrderFilled events from CTF Exchange
-- **market_metadata** - Token ID → timeframe mapping (from Gamma API)
-- **whale_timeframe_stats** - Cached tier assignments
+### Core Tables
+
+| Table | Purpose |
+|-------|---------|
+| `token_timeframes` | Token ID → timeframe mapping (from Gamma API) |
+| `whale_timeframe_stats` | Active whale roster (who we monitor) |
+| `whale_incremental_stats` | Whale observations (running totals from resolution) |
+| `whale_pending_trades` | Pending whale trades awaiting resolution |
+| `dry_run_positions` | Our simulated trades (persists across restarts) |
+| `scan_metadata` | System state tracking |
+
+### Data Isolation
+
+The system keeps data properly segregated:
+
+- **`dry_run_positions`** - OUR actual trades only (used for Capital/ROI display)
+- **`whale_incremental_stats`** - Whale observations (trades we watched but didn't copy)
+- **`whale_pending_trades`** - Pending whale trades for quality tracking
+
+This ensures Capital/ROI on the dashboard only reflects trades we actually took, not retroactive whale performance.
 
 ## Tier System Details
 
@@ -182,10 +255,19 @@ The system uses SQLite (`trades.db`) with these key tables:
 
 | Tier | Min Trades | Min Win Rate | Max Whales |
 |------|------------|--------------|------------|
-| 15min | 20 | 75% | 15 |
-| hourly | 15 | 73% | 15 |
-| 4hour | 10 | 72% | 10 |
-| daily | 10 | 70% | 10 |
+| 15min | 15 | 70% | 15 |
+| hourly | 12 | 68% | 15 |
+| 4hour | 8 | 65% | 10 |
+| daily | 8 | 65% | 10 |
+
+### Automatic Whale Management
+
+Every hour, the system:
+
+1. **Promotes** whales from observations with 80%+ win rate and 5+ resolved trades
+2. **Prunes** active whales that have dropped below 80% win rate
+
+This creates a self-maintaining roster of high-performing whales.
 
 ## Risk Management
 
@@ -194,6 +276,31 @@ The system uses SQLite (`trades.db`) with these key tables:
 - **Max daily exposure**: 60% of capital
 - **Stop-loss**: 30% drawdown triggers system halt
 - **Kelly fraction**: 0.25 (quarter Kelly for safety)
+
+## Dashboard Features
+
+The embedded dashboard at port 8080 provides:
+
+- **Capital/ROI** - Uses 24-hour committed capital for dry run mode (more meaningful than static $100)
+- **Win/Loss tracking** - Real-time trade outcomes
+- **Tier breakdown** - Whales by specialty timeframe
+- **Pending positions** - Trades awaiting resolution
+- **Whale observations** - Performance of all observed whales
+
+### API Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `/` | HTML dashboard |
+| `/api/stats` | Live trading stats (Capital, ROI, win rate) |
+| `/api/whales` | All monitored whales with tier info |
+| `/api/tiers` | Tier breakdown and stats |
+| `/api/trades` | Recent trade history |
+| `/api/pending` | Pending positions awaiting resolution |
+| `/api/dryrun` | Dry run summary statistics |
+| `/api/observations` | Whale observation data |
+| `/api/observations/analytics` | Whale performance analytics |
+| `/api/health` | System health check |
 
 ## Output Files
 
@@ -210,7 +317,8 @@ By default, `AUTO_COPY_ENABLED=false` runs the system in dry run mode:
 
 - All trade detection and analysis runs normally
 - Trades are logged but not executed
-- Simulated P&L calculated based on confidence levels
+- Positions are tracked and resolved based on actual market outcomes
+- Capital/ROI calculated against 24-hour committed capital (not static $100)
 
 Set `AUTO_COPY_ENABLED=true` to enable live trading.
 
@@ -228,6 +336,20 @@ The system prints periodic stats:
 ────────────────────────────────────────────
 ```
 
+Whale management logs:
+
+```
+============================================================
+🐋 WHALE MANAGEMENT - Hourly Roster Update
+============================================================
+   🐋 Promoted 2 top performers from observations to active tier list
+   🧹 Pruned 1 whales with win rate below 80%
+   📊 Changes: +2 promoted, -1 pruned
+   ✅ Reloaded tiers: 26 whales now monitored
+   📈 Observations: 45 whales, 312 resolved trades, 73.4% win rate
+============================================================
+```
+
 ## Troubleshooting
 
 ### "No whales in tiers"
@@ -241,6 +363,14 @@ Normal behavior - the system auto-reconnects with exponential backoff. Falls bac
 ### High threshold rejections
 
 If you see trades rejected at 99% threshold, the whale is trading outside their specialty timeframe. This is intentional - the system is conservative when whales trade outside their area of expertise.
+
+### Position not resolving
+
+Positions are resolved based on actual market outcomes from Gamma API. If a position stays pending longer than expected, the market may not have resolved yet or the API may be delayed.
+
+### Dashboard shows wrong capital
+
+In dry run mode, the dashboard uses 24-hour committed capital instead of static $100. This better reflects actual trading activity since we're not bound by real capital constraints.
 
 ## License
 

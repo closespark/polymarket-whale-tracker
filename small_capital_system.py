@@ -501,6 +501,14 @@ class SmallCapitalSystem:
         # v4: Idempotency protection - track resolved position IDs
         self._resolved_position_ids = set()
 
+        # Load all-time best/worst trades from database
+        if hasattr(self.discovery, 'db') and self.discovery.db:
+            try:
+                self.stats['best_trade'] = self.discovery.db.get_best_trade_pnl()
+                self.stats['worst_trade'] = self.discovery.db.get_worst_trade_pnl()
+            except Exception as e:
+                print(f"⚠️  Could not load best/worst trades from database: {e}")
+
         print(f"💰 SMALL CAPITAL SYSTEM v3")
         print(f"   Starting capital: ${starting_capital}")
         print(f"   Kelly Criterion sizing: ENABLED")
