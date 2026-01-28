@@ -447,11 +447,7 @@ class SmallCapitalSystem:
         print("="*80)
         print()
         
-        # Initial discovery - refreshes whale data from database
-        print("🔍 Analyzing traders from database...")
-        await self.discovery.deep_scan()
-
-        # Populate multi-timeframe tiers from database analysis
+        # Populate multi-timeframe tiers from CSV files / database
         # This determines which whales to monitor via WebSocket
         self._populate_multi_timeframe_tiers()
 
