@@ -40,11 +40,12 @@ class WhaleCopier:
         )
         
         # Initialize Claude for trade analysis
-        if config.ANTHROPIC_API_KEY:
-            self.claude = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        # Check for non-empty API key (not just truthy)
+        api_key = (config.ANTHROPIC_API_KEY or '').strip()
+        if api_key:
+            self.claude = anthropic.Anthropic(api_key=api_key)
         else:
             self.claude = None
-            print(f"{Fore.YELLOW}⚠️  No Anthropic API key - AI analysis disabled")
         
         print(f"{Fore.GREEN}✅ Whale Copier initialized")
         print(f"   Auto-copy: {'ENABLED' if config.AUTO_COPY_ENABLED else 'DISABLED'}")
@@ -206,8 +207,8 @@ Return JSON only:
             analysis = json.loads(response.content[0].text)
             return analysis
         
-        except Exception as e:
-            print(f"{Fore.YELLOW}⚠️  Claude analysis failed: {e}")
+        except Exception:
+            # Silently fall back - don't spam logs
             return {'score': 70, 'reasoning': 'AI analysis unavailable'}
     
     async def copy_trade(self, trade_data, score):
