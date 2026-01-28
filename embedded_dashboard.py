@@ -66,27 +66,54 @@ class EmbeddedDashboard:
         })
 
     async def api_stats(self, request):
-        """Return live trading stats"""
+        """Return live trading stats - merge in-memory with database for persistence"""
         stats = self.system.stats.copy()
         uptime_hours = (datetime.now() - stats['start_time']).total_seconds() / 3600
 
+        # Get database stats for dry run mode (these persist across restarts)
+        db = getattr(self.system.discovery, 'db', None)
+        db_summary = None
+        if db:
+            try:
+                db_summary = await asyncio.to_thread(db.get_dry_run_summary)
+            except:
+                pass
+
+        # Use database stats if available and more complete than in-memory
+        if db_summary and db_summary.get('resolved', 0) > 0:
+            total_trades = db_summary.get('resolved', 0)
+            wins = db_summary.get('wins', 0)
+            losses = db_summary.get('losses', 0)
+            total_profit = db_summary.get('realized_pnl', 0)
+            win_rate = db_summary.get('win_rate', 0)
+        else:
+            total_trades = stats['copies']
+            wins = stats['wins']
+            losses = stats['losses']
+            total_profit = stats['total_profit']
+            win_rate = round(wins / max(1, total_trades) * 100, 1)
+
+        # Calculate ROI based on actual profit
+        starting = stats['starting_capital']
+        roi_percent = (total_profit / starting * 100) if starting > 0 else 0
+
         return web.json_response({
             'mode': 'LIVE' if config.AUTO_COPY_ENABLED else 'DRY_RUN',
-            'starting_capital': stats['starting_capital'],
-            'current_capital': round(self.system.current_capital, 2),
-            'total_profit': round(stats['total_profit'], 2),
-            'roi_percent': round(stats['roi_percent'], 2),
-            'total_trades': stats['copies'],
-            'wins': stats['wins'],
-            'losses': stats['losses'],
-            'win_rate': round(stats['wins'] / max(1, stats['copies']) * 100, 1),
+            'starting_capital': starting,
+            'current_capital': round(starting + total_profit, 2),
+            'total_profit': round(total_profit, 2),
+            'roi_percent': round(roi_percent, 2),
+            'total_trades': total_trades,
+            'wins': wins,
+            'losses': losses,
+            'win_rate': round(win_rate, 1),
             'best_trade': round(stats['best_trade'], 2),
             'worst_trade': round(stats['worst_trade'], 2),
             'current_streak': stats['consecutive_wins'],
             'best_streak': stats['max_consecutive_wins'],
             'opportunities': stats['opportunities'],
             'uptime_hours': round(uptime_hours, 2),
-            'profit_per_day': round(stats['total_profit'] / max(0.01, uptime_hours) * 24, 2),
+            'profit_per_day': round(total_profit / max(0.01, uptime_hours) * 24, 2),
             'start_time': stats['start_time'].isoformat(),
             'timestamp': datetime.now().isoformat()
         })
@@ -120,7 +147,27 @@ class EmbeddedDashboard:
         return web.json_response(tiers)
 
     async def api_trades(self, request):
-        """Return recent trades"""
+        """Return recent trades - from database for persistence"""
+        db = getattr(self.system.discovery, 'db', None)
+        if db:
+            try:
+                resolved = await asyncio.to_thread(db.get_resolved_dry_run_positions)
+                trades = []
+                for pos in resolved[:20]:  # Limit to 20 most recent
+                    trades.append({
+                        'timestamp': pos.get('resolved_at', pos.get('opened_at', '')),
+                        'whale': pos.get('whale_address', '')[:10] + '...' if pos.get('whale_address') else '',
+                        'market': pos.get('market_question', 'Unknown')[:50],
+                        'side': pos.get('side', 'BUY'),
+                        'size': round(pos.get('position_size', 0), 2),
+                        'outcome': 'WIN' if pos.get('is_win') else 'LOSS',
+                        'pnl': round(pos.get('pnl', 0), 2),
+                        'timeframe': pos.get('market_timeframe', 'unknown')
+                    })
+                return web.json_response({'trades': trades, 'count': len(trades)})
+            except Exception as e:
+                pass
+        # Fallback to in-memory
         return web.json_response({'trades': self.recent_trades, 'count': len(self.recent_trades)})
 
     async def api_pending_positions(self, request):
