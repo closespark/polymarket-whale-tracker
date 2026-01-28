@@ -1,0 +1,36 @@
+# Polymarket Whale Tracker - Dependencies
+# Compatible with Render deployment
+
+# Blockchain & Web3
+web3>=7.0.0
+py-clob-client>=0.25.0
+
+# Data Analysis
+pandas>=2.1.4
+numpy>=1.26.3
+
+# API & HTTP
+requests>=2.31.0
+aiohttp>=3.9.1
+websockets>=12.0
+httpx>=0.25.0
+
+# Database (optional)
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.25
+
+# AI Analysis (disabled for speed mode)
+anthropic>=0.18.1
+
+# Utilities
+python-dotenv>=1.0.0
+colorama>=0.4.6
+tqdm>=4.66.1
+pytz>=2024.1
+
+# Web Dashboard
+flask>=3.0.0
+gunicorn>=21.0.0
+
+# For Render health checks
+flask-healthz>=1.0.0

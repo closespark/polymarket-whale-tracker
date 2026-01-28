@@ -1,0 +1,43 @@
+# Secrets - NEVER commit these
+.env
+*.pem
+*_key.txt
+credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+
+# Data files (large, regeneratable)
+*.csv
+*.jsonl
+scan_progress.json
+trading_stats.json
+whale_database.json
+fifteen_min_specialists.csv
+
+# SQLite database (too large for GitHub - 1.6GB)
+# Render will do initial scan on first deployment (~30 mins)
+# Then incremental scans only (~3K blocks/min)
+trades.db
+trades.db-shm
+trades.db-wal
+trades.db-journal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
