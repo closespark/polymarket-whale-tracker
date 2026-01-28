@@ -579,6 +579,7 @@ class SmallCapitalSystem:
                             trade_data['market_question'] = market_info.get('question', '')
                             trade_data['market'] = market_info.get('question', '')
                             timeframe_from_gamma = market_info.get('timeframe')
+                            trade_data['timeframe'] = timeframe_from_gamma or 'unknown'
                         else:
                             # Try to fetch from Gamma API on-demand with retry
                             gamma_market_data = await self._fetch_gamma_market_with_retry(token_id)
@@ -598,6 +599,10 @@ class SmallCapitalSystem:
                             else:
                                 # Track API failures for monitoring
                                 self.quality_stats['api_failures'] = self.quality_stats.get('api_failures', 0) + 1
+
+                    # Skip non-recurring markets (no timeframe = not 15min/hourly/4hour/daily)
+                    if trade_data.get('timeframe', 'unknown') == 'unknown':
+                        return  # Silently skip - not a recurring market
 
                     # v2: Track trade for correlation detection
                     market = trade_data.get('market', trade_data.get('market_question', ''))
