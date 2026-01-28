@@ -296,15 +296,13 @@ class MultiTimeframeStrategy:
             }
         """
 
-        # Use timeframe from trade_data if already extracted (from Gamma API recurrence)
-        # Otherwise fall back to parsing market name (less reliable)
+        # Use timeframe from trade_data (extracted from Gamma API recurrence field)
+        # No fallback to name parsing - recurrence is the only reliable source
         market_timeframe = trade_data.get('timeframe', 'unknown')
-        if market_timeframe == 'unknown':
-            market = trade_data.get('market', trade_data.get('market_question', ''))
-            market_timeframe = self.detect_market_timeframe(market)
 
         # Filter out unknown timeframes (weekly, monthly, pre-market, etc.)
         if market_timeframe == 'unknown':
+            market = trade_data.get('market', trade_data.get('market_question', ''))
             return {
                 'should_copy': False,
                 'threshold': 100.0,
@@ -312,7 +310,7 @@ class MultiTimeframeStrategy:
                 'tier': 'unknown',
                 'market_timeframe': 'unknown',
                 'is_specialty': False,
-                'reason': f'Market not in supported timeframes (15min/hourly/4hour/daily): {market[:50]}...'
+                'reason': f'No recurrence field from Gamma API: {market[:50]}...'
             }
 
         # Find whale's tier
