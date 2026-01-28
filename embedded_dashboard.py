@@ -680,11 +680,12 @@ class EmbeddedDashboard:
                 // Update trade list
                 let tradeHtml = '';
                 for (const trade of tradesData.trades.slice(0, 10)) {
-                    const profit = trade.profit || 0;
+                    const profit = trade.pnl || 0;  // API returns 'pnl' not 'profit'
                     const profitClass = profit >= 0 ? 'positive' : 'negative';
+                    const timeframe = trade.timeframe || '15min';  // API returns 'timeframe' not 'tier'
                     tradeHtml += `<div class="trade-item">
                         <div class="trade-header">
-                            <span class="tier-badge tier-${trade.tier || '15min'}">${trade.tier || '15min'}</span>
+                            <span class="tier-badge tier-${timeframe}">${timeframe}</span>
                             <span class="${profitClass}">${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}</span>
                         </div>
                         <div class="trade-time">${new Date(trade.timestamp).toLocaleString()}</div>
