@@ -336,6 +336,18 @@ class MultiTimeframeStrategy:
                 'reason': f'Blocked market type (soccer O/U): {market_question[:50]}...'
             }
 
+        # Filter out daily markets - capital turns over too slowly
+        if market_timeframe == 'daily':
+            return {
+                'should_copy': False,
+                'threshold': 100.0,
+                'position_multiplier': 0.0,
+                'tier': 'blocked',
+                'market_timeframe': 'daily',
+                'is_specialty': False,
+                'reason': 'Daily markets blocked (slow capital turnover)'
+            }
+
         # Filter out unknown timeframes (weekly, monthly, pre-market, etc.)
         if market_timeframe == 'unknown':
             market = trade_data.get('market', trade_data.get('market_question', ''))
