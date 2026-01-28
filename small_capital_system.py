@@ -1,5 +1,5 @@
 """
-$100 Capital Optimized Trading System v2
+$100 Capital Optimized Trading System v3
 
 Enhancements:
 1. SQLite storage (no redundant scans)
@@ -10,6 +10,8 @@ Enhancements:
 6. Trade aggregation (filters arbitrage/hedging)
 7. Pending position tracking (profit counted on market resolution)
 8. Market lifecycle tracking (real resolution outcomes)
+9. Real-time whale quality tracking (PnL per timeframe)
+10. Automatic tier promotion for new profitable whales
 """
 
 import asyncio
@@ -18,8 +20,22 @@ import json
 import os
 import random
 
-from aiohttp import web
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
 from market_lifecycle import get_market_lifecycle
+from embedded_dashboard import EmbeddedDashboard
+
+# Tier requirements for promotion (same as standalone pipeline)
+TIER_REQUIREMENTS = {
+    '15min': {'min_trades': 15, 'min_win_rate': 0.70},
+    'hourly': {'min_trades': 12, 'min_win_rate': 0.68},
+    '4hour': {'min_trades': 8, 'min_win_rate': 0.65},
+    'daily': {'min_trades': 8, 'min_win_rate': 0.65},
+}
 
 # Timeframe durations for market resolution
 TIMEFRAME_DURATIONS = {
@@ -264,7 +280,6 @@ class PendingPositionTracker:
 
 
 from ultra_fast_discovery import UltraFastDiscovery
-from fifteen_minute_monitor import FifteenMinuteMonitor
 from whale_copier import WhaleCopier
 from claude_validator import ClaudeTradeValidator
 from kelly_sizing import KellySizing, EnhancedPositionSizer
@@ -280,371 +295,6 @@ from position_manager import get_position_manager, PositionManager
 from market_resolver import get_market_resolver, MarketResolver
 
 import config
-
-
-class EmbeddedDashboard:
-    """
-    Embedded aiohttp web server for real-time dashboard
-
-    Access via SSH tunnel from Render:
-        ssh -L 8080:localhost:8080 srv-xxx@ssh.render.com
-    Then open http://localhost:8080 in browser
-    """
-
-    def __init__(self, system):
-        self.system = system
-        self.app = web.Application()
-        self.setup_routes()
-        self.recent_trades = []  # Last 50 trades for display
-        self.max_recent_trades = 50
-
-    def setup_routes(self):
-        """Setup API and dashboard routes"""
-        self.app.router.add_get('/', self.dashboard_html)
-        self.app.router.add_get('/api/stats', self.api_stats)
-        self.app.router.add_get('/api/whales', self.api_whales)
-        self.app.router.add_get('/api/tiers', self.api_tiers)
-        self.app.router.add_get('/api/trades', self.api_trades)
-        self.app.router.add_get('/api/health', self.api_health)
-
-    def record_trade(self, trade_data):
-        """Record a trade for display (called from main system)"""
-        self.recent_trades.insert(0, {
-            'timestamp': datetime.now().isoformat(),
-            **trade_data
-        })
-        # Keep only last N trades
-        self.recent_trades = self.recent_trades[:self.max_recent_trades]
-
-    async def api_health(self, request):
-        """Health check endpoint"""
-        return web.json_response({
-            'status': 'running',
-            'timestamp': datetime.now().isoformat(),
-            'uptime_hours': round((datetime.now() - self.system.stats['start_time']).total_seconds() / 3600, 2)
-        })
-
-    async def api_stats(self, request):
-        """Return live trading stats"""
-        stats = self.system.stats.copy()
-        uptime_hours = (datetime.now() - stats['start_time']).total_seconds() / 3600
-
-        return web.json_response({
-            'mode': 'LIVE' if config.AUTO_COPY_ENABLED else 'DRY_RUN',
-            'starting_capital': stats['starting_capital'],
-            'current_capital': round(self.system.current_capital, 2),
-            'total_profit': round(stats['total_profit'], 2),
-            'roi_percent': round(stats['roi_percent'], 2),
-            'total_trades': stats['copies'],
-            'wins': stats['wins'],
-            'losses': stats['losses'],
-            'win_rate': round(stats['wins'] / max(1, stats['copies']) * 100, 1),
-            'best_trade': round(stats['best_trade'], 2),
-            'worst_trade': round(stats['worst_trade'], 2),
-            'current_streak': stats['consecutive_wins'],
-            'best_streak': stats['max_consecutive_wins'],
-            'opportunities': stats['opportunities'],
-            'uptime_hours': round(uptime_hours, 2),
-            'profit_per_day': round(stats['total_profit'] / max(0.01, uptime_hours) * 24, 2),
-            'start_time': stats['start_time'].isoformat(),
-            'timestamp': datetime.now().isoformat()
-        })
-
-    async def api_whales(self, request):
-        """Return all monitored whales with tier info"""
-        whales = []
-        for tier_name, tier in self.system.multi_tf_strategy.tiers.items():
-            for whale in tier.whales:
-                whales.append({
-                    'address': whale.get('address', ''),
-                    'tier': tier_name,
-                    'win_rate': round(whale.get('win_rate', 0) * 100, 1),
-                    'trade_count': whale.get('trade_count', 0),
-                    'profit': round(whale.get('profit', whale.get('total_profit', 0)), 2),
-                    'specialty': whale.get('specialty', tier_name)
-                })
-        return web.json_response({'whales': whales, 'total': len(whales)})
-
-    async def api_tiers(self, request):
-        """Return tier summary"""
-        tiers = {}
-        for tier_name, tier in self.system.multi_tf_strategy.tiers.items():
-            tiers[tier_name] = {
-                'name': tier.name,
-                'whale_count': len(tier.whales),
-                'base_threshold': tier.base_threshold,
-                'outside_penalty': tier.outside_specialty_penalty,
-                'min_trades': tier.min_trades,
-                'min_win_rate': tier.min_win_rate
-            }
-        return web.json_response(tiers)
-
-    async def api_trades(self, request):
-        """Return recent trades"""
-        return web.json_response({'trades': self.recent_trades, 'count': len(self.recent_trades)})
-
-    async def dashboard_html(self, request):
-        """Serve the dashboard HTML"""
-        html = '''<!DOCTYPE html>
-<html>
-<head>
-    <title>Whale Tracker Dashboard</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0d1117; color: #c9d1d9; padding: 20px;
-        }
-        .header { text-align: center; margin-bottom: 30px; }
-        .header h1 { color: #58a6ff; font-size: 2em; }
-        .mode-badge {
-            display: inline-block; padding: 4px 12px; border-radius: 20px;
-            font-size: 0.8em; font-weight: bold; margin-top: 10px;
-        }
-        .mode-live { background: #238636; color: white; }
-        .mode-dry { background: #f0883e; color: black; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
-        .card {
-            background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-            padding: 20px;
-        }
-        .card h2 { color: #58a6ff; font-size: 1.1em; margin-bottom: 15px; border-bottom: 1px solid #30363d; padding-bottom: 10px; }
-        .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #21262d; }
-        .stat-label { color: #8b949e; }
-        .stat-value { font-weight: bold; }
-        .positive { color: #3fb950; }
-        .negative { color: #f85149; }
-        .whale-list { max-height: 300px; overflow-y: auto; }
-        .whale-item {
-            padding: 10px; border-bottom: 1px solid #21262d;
-            display: flex; justify-content: space-between; align-items: center;
-        }
-        .whale-addr { font-family: monospace; font-size: 0.85em; color: #8b949e; }
-        .whale-stats { text-align: right; }
-        .tier-badge {
-            font-size: 0.7em; padding: 2px 6px; border-radius: 4px;
-            background: #30363d; color: #c9d1d9;
-        }
-        .tier-15min { background: #238636; }
-        .tier-hourly { background: #1f6feb; }
-        .tier-4hour { background: #8957e5; }
-        .tier-daily { background: #f0883e; }
-        .trade-item { padding: 12px; border-bottom: 1px solid #21262d; }
-        .trade-header { display: flex; justify-content: space-between; margin-bottom: 5px; }
-        .trade-time { color: #8b949e; font-size: 0.85em; }
-        .trade-market { font-size: 0.9em; color: #c9d1d9; margin-top: 5px; }
-        .big-number { font-size: 2em; font-weight: bold; }
-        .refresh-info { text-align: center; color: #8b949e; font-size: 0.85em; margin-top: 20px; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-        .live-indicator { animation: pulse 2s infinite; color: #3fb950; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Polymarket Whale Tracker</h1>
-        <div id="mode-badge" class="mode-badge mode-dry">DRY RUN</div>
-        <div class="live-indicator" style="margin-top: 10px;">● Live</div>
-    </div>
-
-    <div class="grid">
-        <div class="card">
-            <h2>Capital</h2>
-            <div style="text-align: center; padding: 20px 0;">
-                <div class="big-number" id="current-capital">$100.00</div>
-                <div style="margin-top: 10px;">
-                    <span id="roi" class="positive">+0.0%</span> ROI
-                </div>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Starting</span>
-                <span class="stat-value" id="starting-capital">$100.00</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Total Profit</span>
-                <span class="stat-value positive" id="total-profit">$0.00</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Profit/Day</span>
-                <span class="stat-value" id="profit-per-day">$0.00</span>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>Trading Performance</h2>
-            <div class="stat-row">
-                <span class="stat-label">Total Trades</span>
-                <span class="stat-value" id="total-trades">0</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Wins / Losses</span>
-                <span class="stat-value"><span id="wins" class="positive">0</span> / <span id="losses" class="negative">0</span></span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Win Rate</span>
-                <span class="stat-value" id="win-rate">0%</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Best Trade</span>
-                <span class="stat-value positive" id="best-trade">$0.00</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Worst Trade</span>
-                <span class="stat-value negative" id="worst-trade">$0.00</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Current Streak</span>
-                <span class="stat-value" id="streak">0</span>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>System Status</h2>
-            <div class="stat-row">
-                <span class="stat-label">Uptime</span>
-                <span class="stat-value" id="uptime">0h</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Opportunities Seen</span>
-                <span class="stat-value" id="opportunities">0</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Whales Monitored</span>
-                <span class="stat-value" id="whale-count">0</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Last Update</span>
-                <span class="stat-value" id="last-update">-</span>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>Tier Breakdown</h2>
-            <div id="tier-stats">Loading...</div>
-        </div>
-
-        <div class="card" style="grid-column: span 2;">
-            <h2>Monitored Whales</h2>
-            <div class="whale-list" id="whale-list">Loading...</div>
-        </div>
-
-        <div class="card" style="grid-column: span 2;">
-            <h2>Recent Trades</h2>
-            <div class="whale-list" id="trade-list">No trades yet</div>
-        </div>
-    </div>
-
-    <div class="refresh-info">Auto-refreshes every 5 seconds</div>
-
-    <script>
-        async function fetchData() {
-            try {
-                const [statsRes, whalesRes, tiersRes, tradesRes] = await Promise.all([
-                    fetch('/api/stats'),
-                    fetch('/api/whales'),
-                    fetch('/api/tiers'),
-                    fetch('/api/trades')
-                ]);
-
-                const stats = await statsRes.json();
-                const whalesData = await whalesRes.json();
-                const tiers = await tiersRes.json();
-                const tradesData = await tradesRes.json();
-
-                // Update mode badge
-                const modeBadge = document.getElementById('mode-badge');
-                modeBadge.textContent = stats.mode;
-                modeBadge.className = 'mode-badge ' + (stats.mode === 'LIVE' ? 'mode-live' : 'mode-dry');
-
-                // Update capital
-                document.getElementById('current-capital').textContent = '$' + stats.current_capital.toFixed(2);
-                document.getElementById('starting-capital').textContent = '$' + stats.starting_capital.toFixed(2);
-                document.getElementById('total-profit').textContent = '$' + stats.total_profit.toFixed(2);
-                document.getElementById('profit-per-day').textContent = '$' + stats.profit_per_day.toFixed(2);
-
-                const roiEl = document.getElementById('roi');
-                roiEl.textContent = (stats.roi_percent >= 0 ? '+' : '') + stats.roi_percent.toFixed(1) + '%';
-                roiEl.className = stats.roi_percent >= 0 ? 'positive' : 'negative';
-
-                // Update trading stats
-                document.getElementById('total-trades').textContent = stats.total_trades;
-                document.getElementById('wins').textContent = stats.wins;
-                document.getElementById('losses').textContent = stats.losses;
-                document.getElementById('win-rate').textContent = stats.win_rate + '%';
-                document.getElementById('best-trade').textContent = '$' + stats.best_trade.toFixed(2);
-                document.getElementById('worst-trade').textContent = '$' + stats.worst_trade.toFixed(2);
-                document.getElementById('streak').textContent = stats.current_streak;
-
-                // Update system status
-                document.getElementById('uptime').textContent = stats.uptime_hours.toFixed(1) + 'h';
-                document.getElementById('opportunities').textContent = stats.opportunities;
-                document.getElementById('whale-count').textContent = whalesData.total;
-                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
-
-                // Update tier stats
-                let tierHtml = '';
-                for (const [name, tier] of Object.entries(tiers)) {
-                    tierHtml += `<div class="stat-row">
-                        <span class="stat-label"><span class="tier-badge tier-${name}">${name}</span></span>
-                        <span class="stat-value">${tier.whale_count} whales (${tier.base_threshold}% threshold)</span>
-                    </div>`;
-                }
-                document.getElementById('tier-stats').innerHTML = tierHtml;
-
-                // Update whale list
-                let whaleHtml = '';
-                for (const whale of whalesData.whales.slice(0, 20)) {
-                    whaleHtml += `<div class="whale-item">
-                        <div>
-                            <span class="tier-badge tier-${whale.tier}">${whale.tier}</span>
-                            <span class="whale-addr">${whale.address.slice(0, 10)}...</span>
-                        </div>
-                        <div class="whale-stats">
-                            <span class="positive">${whale.win_rate}%</span> win · ${whale.trade_count} trades
-                        </div>
-                    </div>`;
-                }
-                document.getElementById('whale-list').innerHTML = whaleHtml || 'No whales loaded';
-
-                // Update trade list
-                let tradeHtml = '';
-                for (const trade of tradesData.trades.slice(0, 10)) {
-                    const profit = trade.profit || 0;
-                    const profitClass = profit >= 0 ? 'positive' : 'negative';
-                    tradeHtml += `<div class="trade-item">
-                        <div class="trade-header">
-                            <span class="tier-badge tier-${trade.tier || '15min'}">${trade.tier || '15min'}</span>
-                            <span class="${profitClass}">${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}</span>
-                        </div>
-                        <div class="trade-time">${new Date(trade.timestamp).toLocaleString()}</div>
-                        <div class="trade-market">${trade.market || 'Unknown market'}</div>
-                    </div>`;
-                }
-                document.getElementById('trade-list').innerHTML = tradeHtml || 'No trades yet';
-
-            } catch (err) {
-                console.error('Fetch error:', err);
-            }
-        }
-
-        // Initial fetch and refresh every 5 seconds
-        fetchData();
-        setInterval(fetchData, 5000);
-    </script>
-</body>
-</html>'''
-        return web.Response(text=html, content_type='text/html')
-
-    async def start(self, host='0.0.0.0', port=8080):
-        """Start the web server"""
-        runner = web.AppRunner(self.app)
-        await runner.setup()
-        site = web.TCPSite(runner, host, port)
-        await site.start()
-        print(f"\n🌐 Dashboard running at http://{host}:{port}")
-        print(f"   Access via SSH tunnel: ssh -L 8080:localhost:8080 <render-ssh>")
-        print(f"   Then open: http://localhost:8080\n")
 
 
 class SmallCapitalSystem:
@@ -725,7 +375,22 @@ class SmallCapitalSystem:
             'roi_percent': 0
         }
 
-        print(f"💰 SMALL CAPITAL SYSTEM v2")
+        # v3: Quality tracking stats
+        self.quality_stats = {
+            'trades_tracked': 0,
+            'tokens_fetched': 0,
+            'whales_promoted': 0,
+            'new_whales_discovered': 0,
+            'last_promotion_check': datetime.now()
+        }
+
+        # v3: Tier promotion interval (every 30 minutes)
+        self.tier_promotion_interval = 1800
+
+        # v4: Idempotency protection - track resolved position IDs
+        self._resolved_position_ids = set()
+
+        print(f"💰 SMALL CAPITAL SYSTEM v3")
         print(f"   Starting capital: ${starting_capital}")
         print(f"   Kelly Criterion sizing: ENABLED")
         print(f"   WebSocket monitoring: ENABLED")
@@ -825,6 +490,12 @@ class SmallCapitalSystem:
             self.position_resolution_loop()
         )
 
+        # v3: Whale quality resolution loop (tracks whale PnL as markets resolve)
+        whale_quality_task = asyncio.create_task(
+            self.whale_quality_resolution_loop()
+        )
+        print("📊 Whale quality tracking started (resolution-based PnL)")
+
         # v4: Market resolver loop for live trading (polls for market outcomes)
         market_resolver_task = None
         if config.AUTO_COPY_ENABLED and self.market_resolver:
@@ -842,7 +513,8 @@ class SmallCapitalSystem:
                 stats_task,
                 compound_task,
                 intel_task,
-                resolution_task
+                resolution_task,
+                whale_quality_task
             ]
             if market_resolver_task:
                 tasks.append(market_resolver_task)
@@ -899,38 +571,53 @@ class SmallCapitalSystem:
                         trade_data['whale_profit'] = 0
                         trade_data['whale_trade_count'] = 0
 
-                    # Enrich with market question from cache (needed for timeframe detection)
+                    # Enrich with market question and timeframe from cache (needed for timeframe detection)
                     token_id = trade_data.get('token_id', trade_data.get('asset_id', ''))
+                    timeframe_from_gamma = None
+                    gamma_market_data = None
+
                     if token_id and not trade_data.get('market_question'):
                         db = self.discovery.db
                         market_info = db.get_cached_market_info(str(token_id))
                         if market_info and market_info.get('question'):
                             trade_data['market_question'] = market_info.get('question', '')
                             trade_data['market'] = market_info.get('question', '')
+                            timeframe_from_gamma = market_info.get('timeframe')
                         else:
-                            # Try to fetch from Gamma API on-demand
-                            try:
-                                import requests
-                                url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
-                                response = requests.get(url, timeout=5)
-                                if response.status_code == 200:
-                                    markets = response.json()
-                                    if isinstance(markets, list) and markets:
-                                        question = markets[0].get('question', '')
-                                        if question:
-                                            trade_data['market_question'] = question
-                                            trade_data['market'] = question
-                                            # Cache for future use
-                                            db.cache_token_timeframe(str(token_id), 'unknown', question[:200])
-                            except Exception:
-                                pass  # Silently skip API failures
+                            # Try to fetch from Gamma API on-demand with retry
+                            gamma_market_data = await self._fetch_gamma_market_with_retry(token_id)
+                            if gamma_market_data:
+                                question = gamma_market_data.get('question', '')
+                                if question:
+                                    trade_data['market_question'] = question
+                                    trade_data['market'] = question
+
+                                    # v3: Extract timeframe from recurrence
+                                    timeframe_from_gamma = self._extract_timeframe_from_gamma(gamma_market_data)
+
+                                    # Cache with timeframe
+                                    db.cache_token_timeframe(str(token_id), timeframe_from_gamma or 'unknown', question[:200])
+                                    self.quality_stats['tokens_fetched'] += 1
+                            else:
+                                # Track API failures for monitoring
+                                self.quality_stats['api_failures'] = self.quality_stats.get('api_failures', 0) + 1
 
                     # v2: Track trade for correlation detection
                     market = trade_data.get('market', trade_data.get('market_question', ''))
                     side = trade_data.get('side', 'BUY')
                     if self.whale_intel and market:
-                        self.whale_intel.correlation_tracker.record_trade(
-                            whale_addr, market, side
+                        self.whale_intel.correlation_tracker.record_whale_trade(
+                            market, whale_addr, side
+                        )
+
+                    # v3: Track whale quality for recognized timeframes
+                    if token_id and timeframe_from_gamma and timeframe_from_gamma != 'unknown':
+                        await self._track_whale_quality(
+                            token_id=str(token_id),
+                            whale_address=whale_addr,
+                            timeframe=timeframe_from_gamma,
+                            trade_data=trade_data,
+                            gamma_market_data=gamma_market_data
                         )
 
                     await self.process_trade_small_capital(trade_data)
@@ -943,14 +630,28 @@ class SmallCapitalSystem:
                 await asyncio.sleep(60)
 
     async def update_whale_list_periodically(self):
-        """Update WebSocket monitor with new whale list every 15 minutes"""
+        """Update WebSocket monitor and refresh tiers from DB every 15 minutes"""
         while True:
             await asyncio.sleep(900)  # 15 minutes
 
-            if self.ws_monitor:
-                whale_addresses = self.discovery.get_monitoring_addresses()
-                self.ws_monitor.update_whales(whale_addresses)
-                print(f"🔄 Updated WebSocket monitor: {len(whale_addresses)} whales")
+            try:
+                # Refresh tiers from database (fixes memory/DB desync)
+                db = self.discovery.db
+                if db and hasattr(self, 'multi_tf_strategy'):
+                    old_count = sum(len(t.whales) for t in self.multi_tf_strategy.tiers.values())
+                    self.multi_tf_strategy.load_from_database(db)
+                    new_count = sum(len(t.whales) for t in self.multi_tf_strategy.tiers.values())
+                    if new_count != old_count:
+                        print(f"🔄 Tier refresh: {old_count} → {new_count} whales")
+
+                # Update WebSocket monitor with current whale list
+                if self.ws_monitor:
+                    whale_addresses = self.discovery.get_monitoring_addresses()
+                    self.ws_monitor.update_whales(whale_addresses)
+                    print(f"🔄 Updated WebSocket monitor: {len(whale_addresses)} whales")
+
+            except Exception as e:
+                print(f"   ⚠️ Periodic update error: {e}")
     
     async def process_trade_small_capital(self, trade_data):
         """
@@ -1035,8 +736,10 @@ class SmallCapitalSystem:
                 base_confidence=confidence
             )
 
-            # Log tier decision
+            # Log tier decision with market info
+            market_question = trade_data.get('market_question', trade_data.get('market', ''))
             print(f"\n📊 Multi-Timeframe Strategy:")
+            print(f"   Market: {market_question[:60]}..." if len(market_question) > 60 else f"   Market: {market_question}" if market_question else "   Market: Unknown")
             print(f"   Tier: {tier_result.get('tier_name', 'Unknown')}")
             print(f"   Market timeframe: {tier_result.get('market_timeframe', '?')}")
             print(f"   Threshold: {tier_result['threshold']:.1f}%")
@@ -1466,11 +1169,475 @@ class SmallCapitalSystem:
         else:
             return 'Other'
 
+    # =========================================================================
+    # v3: WHALE QUALITY TRACKING
+    # Real-time tracking of whale performance by timeframe
+    # =========================================================================
+
+    def _extract_timeframe_from_gamma(self, gamma_data: dict) -> str:
+        """Extract timeframe from Gamma market data (recurrence field only)."""
+        if not gamma_data:
+            return 'unknown'
+        try:
+            events = gamma_data.get('events') or []
+            if events and isinstance(events[0], dict):
+                series = events[0].get('series') or []
+                if series and isinstance(series[0], dict):
+                    rec = (series[0].get('recurrence') or '').strip().lower()
+                    if rec in ('15m', '15min', '15-min'):
+                        return '15min'
+                    if rec in ('hourly', '1h', '1hr'):
+                        return 'hourly'
+                    if rec in ('4h', '4hr', '4-hour', '4 hour'):
+                        return '4hour'
+                    if rec == 'daily':
+                        return 'daily'
+        except (IndexError, KeyError, TypeError):
+            pass
+        return 'unknown'
+
+    def _extract_token_side_from_gamma(self, gamma_data: dict, token_id: str) -> str:
+        """Extract which side (YES/NO or outcome name) this token represents."""
+        if not gamma_data:
+            return None
+        try:
+            raw_ids = gamma_data.get('clobTokenIds')
+            if isinstance(raw_ids, str):
+                import json as json_mod
+                raw_ids = json_mod.loads(raw_ids)
+
+            raw_outcomes = gamma_data.get('outcomes') or gamma_data.get('shortOutcomes') or []
+            if isinstance(raw_outcomes, str):
+                import json as json_mod
+                raw_outcomes = json_mod.loads(raw_outcomes)
+
+            if raw_ids and raw_outcomes:
+                idx = next((i for i, id_ in enumerate(raw_ids) if str(id_) == str(token_id)), None)
+                if idx is not None and idx < len(raw_outcomes):
+                    return str(raw_outcomes[idx]).strip()
+        except Exception:
+            pass
+        return None
+
+    async def _fetch_gamma_market_with_retry(self, token_id: str, max_retries: int = 2) -> dict:
+        """
+        Fetch market data from Gamma API with retry logic.
+
+        Args:
+            token_id: The CLOB token ID
+            max_retries: Number of retries on failure
+
+        Returns:
+            Market data dict or None on failure
+        """
+        if not HAS_REQUESTS:
+            return None
+
+        url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    markets = response.json()
+                    if isinstance(markets, list) and markets:
+                        return markets[0]
+                elif response.status_code == 429:
+                    # Rate limited - respect Retry-After header or use exponential backoff
+                    retry_after = response.headers.get('Retry-After')
+                    if retry_after:
+                        try:
+                            wait_time = int(retry_after)
+                        except ValueError:
+                            wait_time = 5 * (attempt + 1)
+                    else:
+                        wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Log non-200 responses (except 429)
+                    if attempt == max_retries:
+                        print(f"⚠️ Gamma API error {response.status_code} for token {token_id[:16]}...")
+                    continue
+            except requests.exceptions.Timeout:
+                if attempt == max_retries:
+                    print(f"⚠️ Gamma API timeout for token {token_id[:16]}...")
+                await asyncio.sleep(0.5)
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries:
+                    print(f"⚠️ Gamma API request error for token {token_id[:16]}...: {type(e).__name__}")
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                # Unexpected error - log and don't retry
+                print(f"⚠️ Unexpected Gamma API error: {type(e).__name__}: {e}")
+                break
+
+        return None
+
+    async def _track_whale_quality(self, token_id: str, whale_address: str, timeframe: str,
+                                    trade_data: dict, gamma_market_data: dict = None):
+        """
+        Store whale trade for later resolution-based quality tracking.
+        Called when we detect a whale trade on a recognized timeframe market.
+        """
+        try:
+            db = self.discovery.db
+            if not db:
+                return
+
+            # Get end date for expected resolution
+            end_date = None
+            if gamma_market_data:
+                end_date = gamma_market_data.get('endDate') or gamma_market_data.get('end_date')
+
+            if not end_date:
+                # Try to fetch from Gamma if we don't have it
+                gamma_market_data = await self._fetch_gamma_market_with_retry(token_id)
+                if gamma_market_data:
+                    end_date = gamma_market_data.get('endDate') or gamma_market_data.get('end_date')
+
+            if not end_date:
+                # Can't track without resolution time
+                return
+
+            # Get token side (YES/NO or outcome name)
+            token_side = self._extract_token_side_from_gamma(gamma_market_data, token_id)
+
+            # Determine if whale is maker or taker
+            whale_addr_lower = whale_address.lower()
+            maker = (trade_data.get('maker', '') or '').lower()
+            taker = (trade_data.get('taker', '') or '').lower()
+
+            is_maker = (whale_addr_lower == maker)
+
+            # Get amounts
+            maker_amount = int(trade_data.get('maker_amount', 0) or trade_data.get('makerAmountFilled', 0))
+            taker_amount = int(trade_data.get('taker_amount', 0) or trade_data.get('takerAmountFilled', 0))
+
+            if maker_amount == 0 or taker_amount == 0:
+                return
+
+            # Store pending trade
+            db.add_pending_whale_trade(
+                token_id=token_id,
+                whale_address=whale_address,
+                is_maker=is_maker,
+                maker_amount=maker_amount,
+                taker_amount=taker_amount,
+                token_side=token_side,
+                timeframe=timeframe,
+                expected_resolution=end_date
+            )
+
+            self.quality_stats['trades_tracked'] += 1
+
+        except Exception as e:
+            # Silently fail - quality tracking is non-critical
+            pass
+
+    async def whale_quality_resolution_loop(self):
+        """
+        Periodically check pending whale trades for resolution and update stats.
+        Runs every 60 seconds.
+        """
+        while True:
+            try:
+                await asyncio.sleep(60)
+                await self._resolve_pending_whale_trades()
+
+                # Periodic tier promotion check (every 30 min)
+                now = datetime.now()
+                if (now - self.quality_stats['last_promotion_check']).total_seconds() > self.tier_promotion_interval:
+                    await self._promote_qualified_whales()
+                    self.quality_stats['last_promotion_check'] = now
+
+            except Exception as e:
+                print(f"   ⚠️ Quality resolution error: {e}")
+                await asyncio.sleep(60)
+
+    async def _resolve_pending_whale_trades(self):
+        """Check pending trades and resolve those past their resolution time."""
+        db = self.discovery.db
+        if not db:
+            return
+
+        # Run blocking DB call in thread pool to avoid blocking event loop
+        pending_trades = await asyncio.to_thread(db.get_pending_trades_to_resolve)
+        if not pending_trades:
+            return
+
+        # Group by token to minimize API calls
+        by_token = {}
+        for trade in pending_trades:
+            token_id = trade['token_id']
+            if token_id not in by_token:
+                by_token[token_id] = []
+            by_token[token_id].append(trade)
+
+        resolved_count = 0
+
+        for token_id, trades in by_token.items():
+            try:
+                # Fetch resolution from Gamma
+                resolution = await self._fetch_token_resolution(token_id)
+
+                if not resolution or not resolution.get('resolved'):
+                    # Not resolved yet - will check again later
+                    continue
+
+                outcome = resolution.get('outcome')
+                if not outcome:
+                    continue
+
+                # Cache the resolution in token_timeframes table (in thread pool)
+                await asyncio.to_thread(
+                    db.update_token_resolution,
+                    token_id=token_id,
+                    resolved=True,
+                    outcome=outcome,
+                    token_side=trades[0].get('token_side')
+                )
+
+                # Get timeframe and token_side from first trade (same for all)
+                timeframe = trades[0]['timeframe']
+                token_side = trades[0].get('token_side')
+
+                # Process each trade for this token
+                for trade in trades:
+                    pnl = self._calculate_whale_pnl(trade, outcome)
+                    whale_address = trade['whale_address']
+                    volume = trade['taker_amount'] / 1_000_000.0
+
+                    # Update incremental stats (in thread pool)
+                    await asyncio.to_thread(
+                        db.update_whale_incremental_stats,
+                        whale_address, timeframe, pnl, volume
+                    )
+
+                    # Delete processed trade (in thread pool)
+                    await asyncio.to_thread(db.delete_pending_trade, trade['id'])
+                    resolved_count += 1
+
+                # NEW WHALE DISCOVERY: Check all traders on this resolved token
+                await self._discover_new_whales_from_token(token_id, outcome, timeframe, token_side)
+
+            except Exception as e:
+                # Skip this token on error
+                continue
+
+        if resolved_count > 0:
+            print(f"   📊 Resolved {resolved_count} whale trades for quality tracking")
+
+    async def _fetch_token_resolution(self, token_id: str) -> dict:
+        """Fetch resolution status from Gamma API."""
+        if not HAS_REQUESTS:
+            return None
+
+        try:
+            url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
+            r = requests.get(url, timeout=5)
+            if r.status_code != 200:
+                return None
+
+            data = r.json()
+            if not data or not isinstance(data, list):
+                return None
+
+            m = data[0]
+            resolved = m.get('resolved', False) or m.get('closed', False)
+
+            if not resolved:
+                return {'resolved': False}
+
+            # Get outcome
+            raw = m.get('outcome') or m.get('resolution') or m.get('winning_outcome')
+            outcome = self._normalize_outcome(raw)
+
+            # Try outcomePrices if outcome not directly available
+            if not outcome:
+                outcomes = m.get('outcomes') or m.get('shortOutcomes') or []
+                if isinstance(outcomes, str):
+                    import json as json_mod
+                    outcomes = json_mod.loads(outcomes)
+
+                op = m.get('outcomePrices')
+                if op:
+                    if isinstance(op, str):
+                        import json as json_mod
+                        op = json_mod.loads(op)
+                    if isinstance(op, (list, tuple)):
+                        for i, p in enumerate(op):
+                            if i < len(outcomes):
+                                try:
+                                    if p == 1 or p == 1.0 or str(p).strip() == "1":
+                                        outcome = self._normalize_outcome(outcomes[i])
+                                        break
+                                except:
+                                    pass
+
+            return {
+                'resolved': True,
+                'outcome': outcome
+            }
+
+        except Exception:
+            return None
+
+    def _normalize_outcome(self, val) -> str:
+        """Normalize outcome to YES/NO or return raw for non-binary."""
+        if val is None:
+            return None
+        s = str(val).strip().lower()
+        if s in ('yes', 'true', '1', 'up'):
+            return 'YES'
+        if s in ('no', 'false', '0', 'down'):
+            return 'NO'
+        return str(val).strip() if val else None
+
+    def _calculate_whale_pnl(self, trade: dict, outcome: str) -> float:
+        """
+        Calculate whale's PnL for a resolved trade.
+
+        PnL rules:
+        - Taker buys winning token → wins maker_amount/1e6
+        - Taker buys losing token → loses taker_amount/1e6
+        - Maker sells winning token → loses (maker_amount - taker_amount)/1e6
+        - Maker sells losing token → wins taker_amount/1e6
+
+        Returns 0 if token_side is missing (can't calculate without knowing which side).
+        """
+        is_maker = trade['is_maker']
+        maker_amount = trade['maker_amount']
+        taker_amount = trade['taker_amount']
+        token_side = trade.get('token_side')
+
+        # CRITICAL: Validate token_side exists before calculating
+        # If token_side is None/empty, we can't determine win/loss
+        if not token_side:
+            print(f"   ⚠️ Missing token_side for trade, skipping PnL calculation")
+            return 0.0
+
+        # Normalize for comparison (handle YES/Yes/yes variations)
+        outcome_normalized = str(outcome).strip().upper()
+        token_side_normalized = str(token_side).strip().upper()
+
+        # Determine if this token won
+        token_won = (outcome_normalized == token_side_normalized)
+
+        if is_maker:
+            # Maker sold shares
+            if token_won:
+                # Sold winning shares - loss
+                return -max(0, (maker_amount - taker_amount) / 1_000_000.0)
+            else:
+                # Sold losing shares - kept premium
+                return taker_amount / 1_000_000.0
+        else:
+            # Taker bought shares
+            if token_won:
+                # Bought winning shares - wins $1/share
+                return maker_amount / 1_000_000.0
+            else:
+                # Bought losing shares - loses payment
+                return -(taker_amount / 1_000_000.0)
+
+    async def _promote_qualified_whales(self):
+        """Check incremental stats for whales who qualify for tier promotion."""
+        db = self.discovery.db
+        if not db:
+            return
+
+        candidates = db.get_tier_candidates_from_incremental(min_trades=8)
+
+        promoted = 0
+        for row in candidates:
+            address, timeframe, trades, net_pnl, win_rate = row
+
+            # Check tier requirements
+            req = TIER_REQUIREMENTS.get(timeframe, {})
+            min_trades = req.get('min_trades', 10)
+            min_win_rate = req.get('min_win_rate', 0.65)
+
+            if trades >= min_trades and win_rate >= min_win_rate:
+                wins = int(trades * win_rate)
+                losses = trades - wins
+
+                db.promote_whale_to_tier(
+                    address=address,
+                    timeframe=timeframe,
+                    trades=trades,
+                    wins=wins,
+                    losses=losses,
+                    volume=0,
+                    profit=net_pnl,
+                    win_rate=win_rate
+                )
+                promoted += 1
+
+        if promoted > 0:
+            self.quality_stats['whales_promoted'] += promoted
+            print(f"   🐋 Promoted {promoted} whales to tiers based on recent performance")
+
+    async def _discover_new_whales_from_token(self, token_id: str, outcome: str, timeframe: str, token_side: str):
+        """
+        Discover new profitable traders on a resolved token.
+
+        Uses whale_net field from token_timeframes table.
+        Finds addresses that won > $500 on this token and aren't in tiers yet.
+
+        Args:
+            token_id: The CLOB token ID that just resolved
+            outcome: The resolution outcome (YES/NO)
+            timeframe: Market timeframe (15min/hourly/4hour/daily)
+            token_side: Which side this token represents (YES/NO)
+        """
+        db = self.discovery.db
+        if not db:
+            return
+
+        # Get addresses already in tiers (no need to track them again)
+        tier_whales = db.get_all_tier_whales()
+
+        try:
+            # Get winning whales from token_timeframes.whale_net field
+            # Only addresses with PnL >= $500
+            winners = db.get_winning_whales_for_token(token_id, min_pnl=500.0)
+
+            if not winners:
+                return
+
+            discovered = 0
+            for entry in winners:
+                addr = entry['address']
+                pnl = entry['pnl']
+
+                # Skip addresses already in tiers
+                if addr in tier_whales:
+                    continue
+
+                # Update incremental stats for this winning trader
+                # Volume approximated from PnL (assuming ~50% margin on avg)
+                approx_volume = abs(pnl) * 2
+                db.update_whale_incremental_stats(addr, timeframe, pnl, approx_volume)
+                discovered += 1
+
+            if discovered > 0:
+                self.quality_stats['new_whales_discovered'] = self.quality_stats.get('new_whales_discovered', 0) + discovered
+                print(f"   🐋 Discovered {discovered} large winning traders on {token_id[:10]}...")
+
+        except Exception as e:
+            # Non-critical - silently skip
+            pass
+
     def _populate_multi_timeframe_tiers(self):
         """
-        Populate multi-timeframe tiers from database analysis
+        Populate multi-timeframe tiers from CSV files or database.
 
-        Database is the single source of truth - no fallbacks
+        Load order:
+        1. trader_tier_stats.csv → whale_timeframe_stats table (tier whales)
+        2. whale_quality.csv → whale_timeframe_stats table (quality whales)
+        3. Load tiers from whale_timeframe_stats into memory
+        4. token_timeframes.csv → token_timeframes table (market metadata)
 
         IMPORTANT: This method BLOCKS until complete. No other operations
         (monitoring, discovery, etc.) will start until this finishes.
@@ -1482,7 +1649,19 @@ class SmallCapitalSystem:
                 print("⚠️ No database available for tier population")
                 return
 
-            # Load directly from database - no fallbacks
+            # Load trader_tier_stats.csv if available (primary tier source)
+            tier_csv_path = os.environ.get('TRADER_TIER_STATS_CSV', 'trader_tier_stats.csv')
+            if os.path.exists(tier_csv_path):
+                print(f"\n📂 Loading tier whales from {tier_csv_path}...")
+                db.load_trader_tier_stats_csv(tier_csv_path)
+
+            # Load whale_quality.csv if available (supplementary quality whales)
+            quality_csv_path = os.environ.get('WHALE_QUALITY_CSV', 'whale_quality.csv')
+            if os.path.exists(quality_csv_path):
+                print(f"📂 Loading quality whales from {quality_csv_path}...")
+                db.load_whale_quality_csv(quality_csv_path)
+
+            # Load tiers from database into memory
             if not self.multi_tf_strategy.load_from_database(db):
                 print("⚠️ Failed to load tiers from database")
                 return
@@ -1503,22 +1682,17 @@ class SmallCapitalSystem:
                     print(f"      - {w.get('address', '')[:16]}...")
             print(f"   Total: {total_whales} unique whales for WebSocket monitoring")
 
-            # Prune non-whale trades to keep database manageable
-            # Controlled by PRUNE_ON_STARTUP env var (default: false)
-            prune_enabled = os.environ.get('PRUNE_ON_STARTUP', 'false').lower() == 'true'
-
-            if not prune_enabled:
-                print(f"   Pruning disabled (PRUNE_ON_STARTUP=false)")
-            elif total_whales >= 500:
-                stats_before = db.get_database_stats()
-                print(f"\n🗑️  Pruning non-whale trades...")
-                print(f"   Database has {stats_before['trade_count']:,} trades before prune")
-                print(f"   Keeping trades from {total_whales} whales")
-                db.prune_non_whale_trades(whale_addresses)
-                stats_after = db.get_database_stats()
-                print(f"   Database has {stats_after['trade_count']:,} trades after prune")
+            # Load token_timeframes.csv if available (for new whale discovery)
+            csv_path = os.environ.get('TOKEN_TIMEFRAMES_CSV', 'token_timeframes.csv')
+            if os.path.exists(csv_path):
+                print(f"\n📂 Loading token data from {csv_path}...")
+                db.load_token_timeframes_csv(csv_path)
             else:
-                print(f"   Skipping prune - only {total_whales} whales detected (need 500+)")
+                token_stats = db.get_token_timeframes_stats()
+                if token_stats['total'] > 0:
+                    print(f"   Token timeframes data: {token_stats['total']} tokens ({token_stats['resolved']} resolved)")
+                else:
+                    print(f"   ⚠️ No token_timeframes.csv found - new whale discovery will be limited")
 
         except Exception as e:
             print(f"⚠️ Error populating tiers: {e}")
@@ -1619,6 +1793,14 @@ class SmallCapitalSystem:
     async def _on_position_resolved(self, resolved_position: dict):
         """Callback when a live position is resolved by MarketResolver"""
         try:
+            # Idempotency check - prevent double-counting if callback fires twice
+            position_id = resolved_position.get('id') or resolved_position.get('position_id')
+            if position_id:
+                if position_id in self._resolved_position_ids:
+                    print(f"   ⚠️ Skipping duplicate resolution for {position_id}")
+                    return
+                self._resolved_position_ids.add(position_id)
+
             profit = resolved_position.get('pnl', 0)
             is_win = resolved_position.get('is_win', False)
             position_size = resolved_position.get('total_cost', 0)

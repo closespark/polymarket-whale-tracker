@@ -392,44 +392,39 @@ class MultiTimeframeStrategy:
             True if loaded successfully
         """
         try:
-            # Check metadata quality - if mostly unknown, clear cache and refetch
-            if hasattr(db, 'get_metadata_quality'):
-                quality = db.get_metadata_quality()
-                known = quality.get('known', 0)
-                unknown = quality.get('unknown', 0)
-                total_meta = quality.get('total', 0)
-
-                # If we have metadata but >90% is unknown, clear and refetch
-                if total_meta > 100 and unknown > 0 and (unknown / total_meta) > 0.90:
-                    print(f"   Poor metadata quality ({known} known, {unknown} unknown) - clearing cache...")
-                    db.clear_timeframe_cache()
+            import os
+            skip_analysis = os.environ.get('SKIP_ANALYSIS', 'false').lower() == 'true'
 
             # First check if we have cached tiers
             tiers_data = db.get_timeframe_tiers()
-
-            # Check if we have any data
             total = sum(len(t) for t in tiers_data.values())
 
-            # Force re-analysis if:
-            # - No data (total == 0)
-            # - Very few specialists (total <= 1)
-            # - Exactly 100 whales (old artificial limit - need to re-analyze with no limits)
-            needs_reanalysis = (total == 0 or total <= 1 or total == 100)
-
-            if needs_reanalysis:
-                if total == 100:
-                    print("   Cached tier data appears limited (100 whales) - clearing and re-analyzing...")
-                    db.clear_timeframe_cache()
+            # If SKIP_ANALYSIS=true, only use cached data (for memory-constrained environments)
+            if skip_analysis:
+                if total > 0:
+                    print(f"   SKIP_ANALYSIS=true - Loading {total} whales from pre-computed cache")
                 else:
-                    print("   Running multi-timeframe analysis...")
+                    print("   ⚠️ SKIP_ANALYSIS=true but no cached data found!")
+                    print("   Run analysis locally and upload the database with pre-computed stats")
+                    return False
+            else:
+                # Check token timeframes quality - if mostly unknown, clear cache and refetch
+                if hasattr(db, 'get_token_timeframes_stats'):
+                    stats = db.get_token_timeframes_stats()
+                    known = stats.get('known', 0)
+                    unknown = stats.get('unknown', 0)
+                    total_meta = stats.get('total', 0)
 
-                # Fetch market metadata if needed (queries Polymarket API)
-                print("   Fetching market metadata from Polymarket Gamma API...")
-                db.fetch_market_timeframes(max_tokens=300)
+                    # If we have metadata but >90% is unknown, clear and refetch
+                    if total_meta > 100 and unknown > 0 and (unknown / total_meta) > 0.90:
+                        print(f"   Poor token data quality ({known} known, {unknown} unknown) - clearing cache...")
+                        db.clear_timeframe_cache()
 
-                # Run the analysis (memory-optimized)
-                tiers_data = db.analyze_traders_by_timeframe()
-                total = sum(len(t) for t in tiers_data.values())
+                # App loads from pre-computed whale_timeframe_stats
+                # Analysis is done by standalone script, not the live app
+                if total == 0:
+                    print("   ⚠️ No whale tier data found in database")
+                    print("   Run standalone script to populate whale_timeframe_stats table")
 
             if total == 0:
                 print("   No timeframe specialists found in database")
