@@ -159,17 +159,41 @@ class MultiTimeframeStrategy:
             et_tz = pytz.timezone('US/Eastern')
             now_et = datetime.now(et_tz)
 
-            # Pattern: "Month Day, TimeAM/PM ET" (e.g., "January 27, 6PM ET")
-            time_match = re.search(
-                r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),?\s*(\d{1,2})(am|pm)\s*et',
+            # Pattern: "Month Day, TimeAM/PM ET" or "Month Day, Time:MinAM/PM-Time:MinAM/PM ET"
+            # Examples:
+            #   "January 27, 6PM ET"
+            #   "January 28, 9:45AM-10:00AM ET" (15-min markets with time range)
+
+            # First try time range pattern (e.g., "9:45AM-10:00AM ET") - extract END time
+            time_range_match = re.search(
+                r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),?\s*\d{1,2}:\d{2}(?:am|pm)?-(\d{1,2}):(\d{2})(am|pm)\s*et',
                 market_lower
             )
 
-            if time_match:
-                month_name = time_match.group(1)
-                day = int(time_match.group(2))
-                hour = int(time_match.group(3))
-                ampm = time_match.group(4)
+            if time_range_match:
+                month_name = time_range_match.group(1)
+                day = int(time_range_match.group(2))
+                hour = int(time_range_match.group(3))
+                minute = int(time_range_match.group(4))
+                ampm = time_range_match.group(5)
+            else:
+                # Try simple time pattern (e.g., "6PM ET")
+                time_match = re.search(
+                    r'(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),?\s*(\d{1,2})(am|pm)\s*et',
+                    market_lower
+                )
+                if time_match:
+                    month_name = time_match.group(1)
+                    day = int(time_match.group(2))
+                    hour = int(time_match.group(3))
+                    minute = 0
+                    ampm = time_match.group(4)
+                else:
+                    time_match = None
+                    time_range_match = None
+
+            if time_match or time_range_match:
+                # month_name, day, hour, minute, ampm are set above
 
                 # Convert to 24-hour
                 if ampm == 'pm' and hour != 12:
@@ -181,11 +205,11 @@ class MultiTimeframeStrategy:
                 month_num = ['january', 'february', 'march', 'april', 'may', 'june',
                             'july', 'august', 'september', 'october', 'november', 'december'].index(month_name) + 1
 
-                end_time = et_tz.localize(datetime(now_et.year, month_num, day, hour, 0, 0))
+                end_time = et_tz.localize(datetime(now_et.year, month_num, day, hour, minute, 0))
 
                 # If end_time is in the past, it might be next year
                 if end_time < now_et:
-                    end_time = et_tz.localize(datetime(now_et.year + 1, month_num, day, hour, 0, 0))
+                    end_time = et_tz.localize(datetime(now_et.year + 1, month_num, day, hour, minute, 0))
 
                 # Calculate time until end
                 time_until_end = (end_time - now_et).total_seconds() / 3600  # hours
