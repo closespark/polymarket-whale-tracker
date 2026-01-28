@@ -73,11 +73,12 @@ class EmbeddedDashboard:
         # Get database stats for dry run mode (these persist across restarts)
         db = getattr(self.system.discovery, 'db', None)
         db_summary = None
+        db_error = None
         if db:
             try:
                 db_summary = await asyncio.to_thread(db.get_dry_run_summary)
-            except:
-                pass
+            except Exception as e:
+                db_error = str(e)
 
         # Use database stats if available and more complete than in-memory
         if db_summary and db_summary.get('resolved', 0) > 0:
@@ -115,7 +116,9 @@ class EmbeddedDashboard:
             'uptime_hours': round(uptime_hours, 2),
             'profit_per_day': round(total_profit / max(0.01, uptime_hours) * 24, 2),
             'start_time': stats['start_time'].isoformat(),
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'data_source': 'database' if (db_summary and db_summary.get('resolved', 0) > 0) else 'memory',
+            'db_error': db_error
         })
 
     async def api_whales(self, request):

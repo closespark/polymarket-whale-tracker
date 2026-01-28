@@ -1479,9 +1479,17 @@ class SmallCapitalSystem:
         Periodically check pending whale trades for resolution and update stats.
         Runs every 60 seconds.
         """
+        # Check immediately on startup for any past-due whale observations
+        first_run = True
+
         while True:
             try:
-                await asyncio.sleep(60)
+                if not first_run:
+                    await asyncio.sleep(60)
+                else:
+                    first_run = False
+                    print("🔍 Checking for past-due whale observations on startup...")
+
                 await self._resolve_pending_whale_trades()
 
                 # Periodic tier promotion check (every 30 min)
@@ -1500,24 +1508,11 @@ class SmallCapitalSystem:
         if not db:
             return
 
-        # Run blocking DB call in thread pool to avoid blocking event loop
-        pending_trades = await asyncio.to_thread(db.get_pending_trades_to_resolve)
+        # Use local time (consistent with how positions are saved)
+        current_time = datetime.now().isoformat()
 
-        # Debug: Log how many trades are ready to resolve
-        summary = await asyncio.to_thread(db.get_pending_trades_summary)
-        total_pending = summary.get('total', 0)
-        ready_count = summary.get('ready_to_resolve', 0)
-        if total_pending > 0 and ready_count == 0:
-            # Check if it's a timezone issue - get the oldest expected_resolution
-            cursor = db.conn.execute("""
-                SELECT expected_resolution, datetime('now') as now_utc
-                FROM whale_pending_trades
-                ORDER BY expected_resolution ASC
-                LIMIT 1
-            """)
-            row = cursor.fetchone()
-            if row:
-                print(f"   🔍 Whale obs: {total_pending} pending, {ready_count} ready. Oldest: {row[0]}, Now UTC: {row[1]}")
+        # Run blocking DB call in thread pool to avoid blocking event loop
+        pending_trades = await asyncio.to_thread(db.get_pending_trades_to_resolve, current_time)
 
         if not pending_trades:
             return
@@ -1919,8 +1914,15 @@ class SmallCapitalSystem:
 
     async def position_resolution_loop(self):
         """Check and resolve pending positions every 30 seconds"""
+        # Check immediately on startup for any past-due positions
+        first_run = True
+
         while True:
-            await asyncio.sleep(30)
+            if not first_run:
+                await asyncio.sleep(30)
+            else:
+                first_run = False
+                print("🔍 Checking for past-due dry-run positions on startup...")
 
             try:
                 if config.AUTO_COPY_ENABLED and self.market_resolver:

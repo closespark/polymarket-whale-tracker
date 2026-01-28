@@ -660,19 +660,26 @@ class TradeDatabase:
                   maker_amount, taker_amount, token_side, timeframe, expected_resolution))
             self.conn.commit()
 
-    def get_pending_trades_to_resolve(self) -> list:
+    def get_pending_trades_to_resolve(self, current_time: str = None) -> list:
         """
         Get pending trades where expected resolution time has passed.
         Returns list of dicts with trade info.
+
+        Args:
+            current_time: ISO format timestamp to compare against (defaults to now)
         """
+        from datetime import datetime
+        if current_time is None:
+            current_time = datetime.now().isoformat()
+
         cursor = self.conn.execute("""
             SELECT id, token_id, whale_address, is_maker, maker_amount, taker_amount,
                    token_side, timeframe, expected_resolution, created_at
             FROM whale_pending_trades
-            WHERE expected_resolution <= datetime('now')
+            WHERE expected_resolution <= ?
             ORDER BY expected_resolution ASC
             LIMIT 100
-        """)
+        """, (current_time,))
         trades = []
         for row in cursor:
             trades.append({
@@ -731,16 +738,24 @@ class TradeDatabase:
         row = cursor.fetchone()
         return row[0] if row else 0
 
-    def get_pending_trades_summary(self) -> dict:
-        """Get summary of pending trades for logging."""
+    def get_pending_trades_summary(self, current_time: str = None) -> dict:
+        """Get summary of pending trades for logging.
+
+        Args:
+            current_time: ISO format timestamp to compare against (defaults to now)
+        """
+        from datetime import datetime
+        if current_time is None:
+            current_time = datetime.now().isoformat()
+
         cursor = self.conn.execute("""
             SELECT
                 COUNT(*) as total,
                 COUNT(DISTINCT token_id) as unique_tokens,
                 COUNT(DISTINCT whale_address) as unique_whales,
-                SUM(CASE WHEN expected_resolution <= datetime('now') THEN 1 ELSE 0 END) as ready_to_resolve
+                SUM(CASE WHEN expected_resolution <= ? THEN 1 ELSE 0 END) as ready_to_resolve
             FROM whale_pending_trades
-        """)
+        """, (current_time,))
         row = cursor.fetchone()
         return {
             'total': row[0] or 0,
