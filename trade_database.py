@@ -639,6 +639,17 @@ class TradeDatabase:
         row = cursor.fetchone()
         return row[0] if row else None
 
+    def get_cached_market_info(self, token_id: str) -> Optional[Dict]:
+        """Get cached market info (timeframe and question) for a token"""
+        cursor = self.conn.execute(
+            "SELECT timeframe, question FROM market_metadata WHERE token_id = ?",
+            (token_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {'timeframe': row[0], 'question': row[1]}
+        return None
+
     def cache_token_timeframe(self, token_id: str, timeframe: str, question: str = ''):
         """Cache a token's timeframe"""
         self.conn.execute("""

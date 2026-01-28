@@ -899,6 +899,15 @@ class SmallCapitalSystem:
                         trade_data['whale_profit'] = 0
                         trade_data['whale_trade_count'] = 0
 
+                    # Enrich with market question from cache (needed for timeframe detection)
+                    token_id = trade_data.get('token_id', trade_data.get('asset_id', ''))
+                    if token_id and not trade_data.get('market_question'):
+                        db = self.discovery.db
+                        market_info = db.get_cached_market_info(str(token_id))
+                        if market_info:
+                            trade_data['market_question'] = market_info.get('question', '')
+                            trade_data['market'] = market_info.get('question', '')
+
                     # v2: Track trade for correlation detection
                     market = trade_data.get('market', trade_data.get('market_question', ''))
                     side = trade_data.get('side', 'BUY')

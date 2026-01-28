@@ -260,8 +260,13 @@ class WebSocketTradeMonitor:
                 # Each uint256 is 32 bytes (64 hex chars)
                 data = log_data['data'][2:]  # Remove 0x prefix
                 # makerAssetId at offset 0, takerAssetId at 64, makerAmountFilled at 128, takerAmountFilled at 192
+                maker_asset_id = int(data[0:64], 16)  # makerAssetId (token ID)
+                taker_asset_id = int(data[64:128], 16)  # takerAssetId
                 maker_amount = int(data[128:192], 16)  # makerAmountFilled
                 taker_amount = int(data[192:256], 16)  # takerAmountFilled
+
+                # The token_id is the non-zero asset ID (USDC is 0)
+                token_id = maker_asset_id if maker_asset_id != 0 else taker_asset_id
 
                 # Calculate USDC value (taker_amount is in USDC with 6 decimals)
                 usdc_value = taker_amount / 1e6
@@ -271,6 +276,10 @@ class WebSocketTradeMonitor:
                     'side': side,
                     'maker': maker,
                     'taker': taker,
+                    'token_id': str(token_id),
+                    'asset_id': str(token_id),
+                    'maker_asset_id': maker_asset_id,
+                    'taker_asset_id': taker_asset_id,
                     'maker_amount': maker_amount,
                     'taker_amount': taker_amount,
                     'usdc_value': usdc_value,
