@@ -323,6 +323,7 @@ class MultiTimeframeStrategy:
                 'threshold': 95.0,
                 'position_multiplier': 0.5,
                 'tier': 'unknown',
+                'market_timeframe': market_timeframe,  # Preserve timeframe for logging
                 'is_specialty': False,
                 'reason': 'Whale not in monitored tiers'
             }

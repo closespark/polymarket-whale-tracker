@@ -87,11 +87,18 @@ class PendingPositionTracker:
             if db_positions:
                 for db_pos in db_positions:
                     # Convert database format to in-memory format
+                    opened_at = datetime.fromisoformat(db_pos['opened_at']) if db_pos.get('opened_at') else datetime.now()
+                    market_timeframe = db_pos.get('market_timeframe', '15min')
+
+                    # Recalculate expected_resolution from market_timeframe to fix any bad data
+                    resolution_delay = TIMEFRAME_DURATIONS.get(market_timeframe, timedelta(minutes=15))
+                    expected_resolution = opened_at + resolution_delay
+
                     position = {
                         'id': db_pos['id'],
-                        'opened_at': datetime.fromisoformat(db_pos['opened_at']) if db_pos.get('opened_at') else datetime.now(),
-                        'expected_resolution': datetime.fromisoformat(db_pos['expected_resolution']) if db_pos.get('expected_resolution') else datetime.now(),
-                        'market_timeframe': db_pos.get('market_timeframe', '15min'),
+                        'opened_at': opened_at,
+                        'expected_resolution': expected_resolution,
+                        'market_timeframe': market_timeframe,
                         'position_size': db_pos.get('position_size', 0),
                         'confidence': db_pos.get('confidence', 0),
                         'whale_address': db_pos.get('whale_address', ''),
