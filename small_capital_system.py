@@ -154,6 +154,13 @@ class PendingPositionTracker:
             position_size: Our position size in USDC
             confidence: Confidence score used for this trade
         """
+        # Check for duplicate position on same token
+        token_id = trade_data.get('token_id', trade_data.get('asset_id', ''))
+        if token_id and self.db and self.db.has_pending_position_for_token(token_id):
+            market = trade_data.get('market_question', trade_data.get('market', 'Unknown'))
+            print(f"   ⚠️ Skipping duplicate - already have pending position on: {market[:50]}")
+            return None
+
         market_timeframe = trade_data.get('market_timeframe', '15min')
 
         # Use actual market end_date from Gamma API if available

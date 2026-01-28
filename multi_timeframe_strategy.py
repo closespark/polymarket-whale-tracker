@@ -278,6 +278,29 @@ class MultiTimeframeStrategy:
 
         return None, None
 
+    def _is_blocked_market(self, market_question: str) -> bool:
+        """
+        Check if market should be blocked based on historical loss patterns.
+
+        Currently blocks: Soccer/football O/U markets (Champions League, Europa League, etc.)
+        These showed poor performance in backtesting despite high confidence scores.
+        """
+        if not market_question:
+            return False
+
+        q = market_question.lower()
+
+        # Block soccer O/U markets - identified as loss pattern
+        # These contain team names (FC, Club, United, City) + O/U betting lines
+        soccer_team_indicators = ['fc', 'club', 'united', 'city', 'sc', 'cf']
+        is_over_under = 'o/u' in q or 'over/under' in q
+        has_soccer_team = any(indicator in q for indicator in soccer_team_indicators)
+
+        if is_over_under and has_soccer_team:
+            return True
+
+        return False
+
     def should_copy_trade(self,
                           whale_address: str,
                           trade_data: Dict,
@@ -299,6 +322,19 @@ class MultiTimeframeStrategy:
         # Use timeframe from trade_data (extracted from Gamma API recurrence field)
         # No fallback to name parsing - recurrence is the only reliable source
         market_timeframe = trade_data.get('timeframe', 'unknown')
+
+        # Filter out blocked market types (e.g., Champions League O/U)
+        market_question = trade_data.get('market', trade_data.get('market_question', ''))
+        if self._is_blocked_market(market_question):
+            return {
+                'should_copy': False,
+                'threshold': 100.0,
+                'position_multiplier': 0.0,
+                'tier': 'blocked',
+                'market_timeframe': market_timeframe,
+                'is_specialty': False,
+                'reason': f'Blocked market type (soccer O/U): {market_question[:50]}...'
+            }
 
         # Filter out unknown timeframes (weekly, monthly, pre-market, etc.)
         if market_timeframe == 'unknown':

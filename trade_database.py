@@ -927,6 +927,15 @@ class TradeDatabase:
             ))
             self.conn.commit()
 
+    def has_pending_position_for_token(self, token_id: str) -> bool:
+        """Check if we already have a pending position for this token (duplicate prevention)."""
+        cursor = self.conn.execute("""
+            SELECT 1 FROM dry_run_positions
+            WHERE token_id = ? AND status = 'PENDING'
+            LIMIT 1
+        """, (token_id,))
+        return cursor.fetchone() is not None
+
     def get_pending_dry_run_positions(self) -> list:
         """Get all pending (unresolved) dry run positions."""
         import json
