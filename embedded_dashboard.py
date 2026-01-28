@@ -113,8 +113,7 @@ class EmbeddedDashboard:
                 'name': tier.name,
                 'whale_count': len(tier.whales),
                 'base_threshold': tier.base_threshold,
-                'outside_penalty': tier.outside_specialty_penalty,
-                'min_trades': tier.min_trades,
+                'position_multiplier': tier.position_multiplier,
                 'min_win_rate': tier.min_win_rate
             }
         return web.json_response(tiers)
