@@ -1502,6 +1502,23 @@ class SmallCapitalSystem:
 
         # Run blocking DB call in thread pool to avoid blocking event loop
         pending_trades = await asyncio.to_thread(db.get_pending_trades_to_resolve)
+
+        # Debug: Log how many trades are ready to resolve
+        summary = await asyncio.to_thread(db.get_pending_trades_summary)
+        total_pending = summary.get('total', 0)
+        ready_count = summary.get('ready_to_resolve', 0)
+        if total_pending > 0 and ready_count == 0:
+            # Check if it's a timezone issue - get the oldest expected_resolution
+            cursor = db.conn.execute("""
+                SELECT expected_resolution, datetime('now') as now_utc
+                FROM whale_pending_trades
+                ORDER BY expected_resolution ASC
+                LIMIT 1
+            """)
+            row = cursor.fetchone()
+            if row:
+                print(f"   🔍 Whale obs: {total_pending} pending, {ready_count} ready. Oldest: {row[0]}, Now UTC: {row[1]}")
+
         if not pending_trades:
             return
 
