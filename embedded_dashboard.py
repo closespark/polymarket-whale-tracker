@@ -42,6 +42,10 @@ class EmbeddedDashboard:
         self.app.router.add_get('/api/tiers', self.api_tiers)
         self.app.router.add_get('/api/trades', self.api_trades)
         self.app.router.add_get('/api/health', self.api_health)
+        self.app.router.add_get('/api/pending', self.api_pending_positions)
+        self.app.router.add_get('/api/dryrun', self.api_dryrun_summary)
+        self.app.router.add_get('/api/observations', self.api_whale_observations)
+        self.app.router.add_get('/api/observations/analytics', self.api_observations_analytics)
 
     def record_trade(self, trade_data):
         """Record a trade for display (called from main system)"""
@@ -118,6 +122,83 @@ class EmbeddedDashboard:
     async def api_trades(self, request):
         """Return recent trades"""
         return web.json_response({'trades': self.recent_trades, 'count': len(self.recent_trades)})
+
+    async def api_pending_positions(self, request):
+        """Return pending positions with breakdown by timeframe"""
+        pending_summary = self.system.position_tracker.get_pending_summary()
+        positions = []
+
+        for pos in self.system.position_tracker.pending_positions:
+            positions.append({
+                'id': pos.get('id', ''),
+                'whale': pos.get('whale_address', '')[:10] + '...' if pos.get('whale_address') else '',
+                'size': round(pos.get('position_size', 0), 2),
+                'confidence': round(pos.get('confidence', 0), 1),
+                'timeframe': pos.get('market_timeframe', ''),
+                'market': pos.get('market', '')[:50] + '...' if len(pos.get('market', '')) > 50 else pos.get('market', ''),
+                'side': pos.get('side', ''),
+                'opened_at': pos.get('opened_at').isoformat() if hasattr(pos.get('opened_at'), 'isoformat') else str(pos.get('opened_at', '')),
+                'expected_resolution': pos.get('expected_resolution').strftime('%H:%M:%S') if hasattr(pos.get('expected_resolution'), 'strftime') else str(pos.get('expected_resolution', '')),
+                'tier': pos.get('tier', 'unknown')
+            })
+
+        return web.json_response({
+            'pending_count': pending_summary.get('pending_count', 0),
+            'pending_total': round(pending_summary.get('pending_total', 0), 2),
+            'resolved_count': pending_summary.get('resolved_count', 0),
+            'by_timeframe': pending_summary.get('by_timeframe', {}),
+            'positions': positions
+        })
+
+    async def api_dryrun_summary(self, request):
+        """Return dry run summary from database"""
+        db = getattr(self.system.discovery, 'db', None)
+        if not db:
+            return web.json_response({'error': 'No database available'})
+
+        try:
+            summary = db.get_dry_run_summary()
+            return web.json_response({
+                'total_positions': summary.get('total', 0),
+                'pending': summary.get('pending', 0),
+                'resolved': summary.get('resolved', 0),
+                'wins': summary.get('wins', 0),
+                'losses': summary.get('losses', 0),
+                'pending_exposure': round(summary.get('pending_exposure', 0), 2),
+                'realized_pnl': round(summary.get('realized_pnl', 0), 2),
+                'win_rate': round(summary.get('win_rate', 0), 1)
+            })
+        except Exception as e:
+            return web.json_response({'error': str(e)})
+
+    async def api_whale_observations(self, request):
+        """Return whale observation stats (trades being watched for resolution)"""
+        db = getattr(self.system.discovery, 'db', None)
+        if not db:
+            return web.json_response({'error': 'No database available'})
+
+        try:
+            summary = db.get_pending_trades_summary()
+            return web.json_response({
+                'total_observations': summary.get('total', 0),
+                'unique_tokens': summary.get('unique_tokens', 0),
+                'unique_whales': summary.get('unique_whales', 0),
+                'ready_to_resolve': summary.get('ready_to_resolve', 0)
+            })
+        except Exception as e:
+            return web.json_response({'error': str(e)})
+
+    async def api_observations_analytics(self, request):
+        """Return comprehensive whale observation analytics - what we learned from trades not taken"""
+        db = getattr(self.system.discovery, 'db', None)
+        if not db:
+            return web.json_response({'error': 'No database available'})
+
+        try:
+            analytics = db.get_whale_observations_analytics()
+            return web.json_response(analytics)
+        except Exception as e:
+            return web.json_response({'error': str(e)})
 
     async def dashboard_html(self, request):
         """Serve the dashboard HTML"""
@@ -250,8 +331,64 @@ class EmbeddedDashboard:
                 <span class="stat-value" id="whale-count">0</span>
             </div>
             <div class="stat-row">
+                <span class="stat-label">Whale Observations</span>
+                <span class="stat-value" id="observations-count">0</span>
+            </div>
+            <div class="stat-row">
                 <span class="stat-label">Last Update</span>
                 <span class="stat-value" id="last-update">-</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Pending Positions</h2>
+            <div style="text-align: center; padding: 15px 0;">
+                <div class="big-number" id="pending-count">0</div>
+                <div style="color: #8b949e;">positions awaiting resolution</div>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Total Committed</span>
+                <span class="stat-value" id="pending-total">$0.00</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">15min</span>
+                <span class="stat-value" id="pending-15min">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Hourly</span>
+                <span class="stat-value" id="pending-hourly">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">4hour</span>
+                <span class="stat-value" id="pending-4hour">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Daily</span>
+                <span class="stat-value" id="pending-daily">0</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Dry Run Summary (DB)</h2>
+            <div class="stat-row">
+                <span class="stat-label">Total Positions</span>
+                <span class="stat-value" id="dryrun-total">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Pending</span>
+                <span class="stat-value" id="dryrun-pending">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Resolved</span>
+                <span class="stat-value" id="dryrun-resolved">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Win Rate</span>
+                <span class="stat-value" id="dryrun-winrate">0%</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Realized P&L</span>
+                <span class="stat-value" id="dryrun-pnl">$0.00</span>
             </div>
         </div>
 
@@ -261,12 +398,74 @@ class EmbeddedDashboard:
         </div>
 
         <div class="card" style="grid-column: span 2;">
+            <h2>Whale Observations Analytics</h2>
+            <p style="color: #8b949e; font-size: 0.85em; margin-bottom: 15px;">What we learned from trades we watched but didn't copy</p>
+            <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 15px;">
+                <div>
+                    <h3 style="color: #58a6ff; font-size: 0.9em; margin-bottom: 10px;">Summary</h3>
+                    <div class="stat-row">
+                        <span class="stat-label">Whales Observed</span>
+                        <span class="stat-value" id="obs-whales">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Resolved Trades</span>
+                        <span class="stat-value" id="obs-resolved">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Overall Win Rate</span>
+                        <span class="stat-value" id="obs-winrate">0%</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Total P&L Observed</span>
+                        <span class="stat-value" id="obs-pnl">$0.00</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Pending</span>
+                        <span class="stat-value" id="obs-pending">0</span>
+                    </div>
+                </div>
+                <div>
+                    <h3 style="color: #58a6ff; font-size: 0.9em; margin-bottom: 10px;">Insights</h3>
+                    <div class="stat-row">
+                        <span class="stat-label">Best Timeframe</span>
+                        <span class="stat-value" id="obs-best-tf">-</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Most Active TF</span>
+                        <span class="stat-value" id="obs-active-tf">-</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Missed Profit</span>
+                        <span class="stat-value positive" id="obs-missed">$0.00</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Avoided Loss</span>
+                        <span class="stat-value negative" id="obs-avoided">$0.00</span>
+                    </div>
+                </div>
+            </div>
+            <div style="margin-top: 15px;">
+                <h3 style="color: #58a6ff; font-size: 0.9em; margin-bottom: 10px;">Performance by Timeframe</h3>
+                <div id="obs-by-tf">Loading...</div>
+            </div>
+            <div style="margin-top: 15px;">
+                <h3 style="color: #3fb950; font-size: 0.9em; margin-bottom: 10px;">Top Performers (Whales to Watch)</h3>
+                <div id="obs-top-whales" style="font-size: 0.85em;">Loading...</div>
+            </div>
+        </div>
+
+        <div class="card" style="grid-column: span 2;">
+            <h2>Pending Positions Detail</h2>
+            <div class="whale-list" id="pending-list">No pending positions</div>
+        </div>
+
+        <div class="card" style="grid-column: span 2;">
             <h2>Monitored Whales</h2>
             <div class="whale-list" id="whale-list">Loading...</div>
         </div>
 
         <div class="card" style="grid-column: span 2;">
-            <h2>Recent Trades</h2>
+            <h2>Recent Resolved Trades</h2>
             <div class="whale-list" id="trade-list">No trades yet</div>
         </div>
     </div>
@@ -276,17 +475,25 @@ class EmbeddedDashboard:
     <script>
         async function fetchData() {
             try {
-                const [statsRes, whalesRes, tiersRes, tradesRes] = await Promise.all([
+                const [statsRes, whalesRes, tiersRes, tradesRes, pendingRes, dryrunRes, obsRes, analyticsRes] = await Promise.all([
                     fetch('/api/stats'),
                     fetch('/api/whales'),
                     fetch('/api/tiers'),
-                    fetch('/api/trades')
+                    fetch('/api/trades'),
+                    fetch('/api/pending'),
+                    fetch('/api/dryrun'),
+                    fetch('/api/observations'),
+                    fetch('/api/observations/analytics')
                 ]);
 
                 const stats = await statsRes.json();
                 const whalesData = await whalesRes.json();
                 const tiers = await tiersRes.json();
                 const tradesData = await tradesRes.json();
+                const pendingData = await pendingRes.json();
+                const dryrunData = await dryrunRes.json();
+                const obsData = await obsRes.json();
+                const analytics = await analyticsRes.json();
 
                 // Update mode badge
                 const modeBadge = document.getElementById('mode-badge');
@@ -316,7 +523,81 @@ class EmbeddedDashboard:
                 document.getElementById('uptime').textContent = stats.uptime_hours.toFixed(1) + 'h';
                 document.getElementById('opportunities').textContent = stats.opportunities;
                 document.getElementById('whale-count').textContent = whalesData.total;
+                document.getElementById('observations-count').textContent = obsData.total_observations || 0;
                 document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+
+                // Update pending positions
+                document.getElementById('pending-count').textContent = pendingData.pending_count || 0;
+                document.getElementById('pending-total').textContent = '$' + (pendingData.pending_total || 0).toFixed(2);
+                const byTf = pendingData.by_timeframe || {};
+                document.getElementById('pending-15min').textContent = (byTf['15min'] || {}).count || 0;
+                document.getElementById('pending-hourly').textContent = (byTf['hourly'] || {}).count || 0;
+                document.getElementById('pending-4hour').textContent = (byTf['4hour'] || {}).count || 0;
+                document.getElementById('pending-daily').textContent = (byTf['daily'] || {}).count || 0;
+
+                // Update dry run summary
+                document.getElementById('dryrun-total').textContent = dryrunData.total_positions || 0;
+                document.getElementById('dryrun-pending').textContent = dryrunData.pending || 0;
+                document.getElementById('dryrun-resolved').textContent = dryrunData.resolved || 0;
+                document.getElementById('dryrun-winrate').textContent = (dryrunData.win_rate || 0).toFixed(1) + '%';
+                const pnl = dryrunData.realized_pnl || 0;
+                const pnlEl = document.getElementById('dryrun-pnl');
+                pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+                pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'positive' : 'negative');
+
+                // Update observations analytics
+                if (analytics.summary) {
+                    const s = analytics.summary;
+                    document.getElementById('obs-whales').textContent = s.unique_whales_observed || 0;
+                    document.getElementById('obs-resolved').textContent = s.total_resolved_trades || 0;
+                    document.getElementById('obs-winrate').textContent = (s.overall_win_rate || 0).toFixed(1) + '%';
+                    const obsPnl = s.total_pnl_observed || 0;
+                    const obsPnlEl = document.getElementById('obs-pnl');
+                    obsPnlEl.textContent = (obsPnl >= 0 ? '+' : '') + '$' + obsPnl.toFixed(2);
+                    obsPnlEl.className = 'stat-value ' + (obsPnl >= 0 ? 'positive' : 'negative');
+                    document.getElementById('obs-pending').textContent = s.pending_observations || 0;
+                }
+                if (analytics.insights) {
+                    const i = analytics.insights;
+                    document.getElementById('obs-best-tf').textContent = i.best_timeframe || '-';
+                    document.getElementById('obs-active-tf').textContent = i.most_active_timeframe || '-';
+                    document.getElementById('obs-missed').textContent = '$' + (i.missed_profit || 0).toFixed(2);
+                    document.getElementById('obs-avoided').textContent = '$' + (i.avoided_loss || 0).toFixed(2);
+                }
+                // By timeframe table
+                let tfHtml = '';
+                for (const [tf, data] of Object.entries(analytics.by_timeframe || {})) {
+                    const tfPnl = data.net_pnl || 0;
+                    const tfClass = tfPnl >= 0 ? 'positive' : 'negative';
+                    tfHtml += `<div class="stat-row">
+                        <span class="stat-label"><span class="tier-badge tier-${tf}">${tf}</span></span>
+                        <span class="stat-value">${data.trades} trades · ${data.win_rate}% win · <span class="${tfClass}">${tfPnl >= 0 ? '+' : ''}$${tfPnl.toFixed(2)}</span></span>
+                    </div>`;
+                }
+                document.getElementById('obs-by-tf').innerHTML = tfHtml || 'No data yet';
+                // Top performers
+                let topHtml = '';
+                for (const w of (analytics.top_performers || []).slice(0, 5)) {
+                    topHtml += `<div class="stat-row">
+                        <span class="whale-addr">${w.address.slice(0, 10)}... <span class="tier-badge tier-${w.timeframe}">${w.timeframe}</span></span>
+                        <span class="stat-value positive">+$${w.net_pnl.toFixed(2)} (${w.win_rate}% / ${w.trades})</span>
+                    </div>`;
+                }
+                document.getElementById('obs-top-whales').innerHTML = topHtml || 'No data yet';
+
+                // Update pending positions list
+                let pendingHtml = '';
+                for (const pos of (pendingData.positions || []).slice(0, 15)) {
+                    pendingHtml += `<div class="trade-item">
+                        <div class="trade-header">
+                            <span class="tier-badge tier-${pos.timeframe}">${pos.timeframe}</span>
+                            <span>$${pos.size.toFixed(2)} @ ${pos.confidence}%</span>
+                        </div>
+                        <div class="trade-time">Whale: ${pos.whale} · ${pos.side} · Resolves: ${pos.expected_resolution}</div>
+                        <div class="trade-market">${pos.market}</div>
+                    </div>`;
+                }
+                document.getElementById('pending-list').innerHTML = pendingHtml || 'No pending positions';
 
                 // Update tier stats
                 let tierHtml = '';

@@ -506,6 +506,131 @@ class TradeDatabase:
             'total_pnl': row[2] or 0
         }
 
+    def get_whale_observations_analytics(self) -> dict:
+        """
+        Get comprehensive analytics on whale observations (trades we watched but didn't copy).
+        This shows "what we learned" from watching whale behavior.
+        """
+        # Overall stats
+        cursor = self.conn.execute("""
+            SELECT
+                COUNT(DISTINCT address) as unique_whales,
+                SUM(trades) as total_trades,
+                SUM(wins) as total_wins,
+                SUM(losses) as total_losses,
+                SUM(net_pnl) as total_pnl,
+                SUM(volume) as total_volume
+            FROM whale_incremental_stats
+        """)
+        overall = cursor.fetchone()
+
+        # Performance by timeframe
+        cursor = self.conn.execute("""
+            SELECT
+                timeframe,
+                COUNT(DISTINCT address) as whale_count,
+                SUM(trades) as trades,
+                SUM(wins) as wins,
+                SUM(losses) as losses,
+                SUM(net_pnl) as net_pnl,
+                CASE WHEN SUM(trades) > 0
+                    THEN CAST(SUM(wins) AS REAL) / SUM(trades) * 100
+                    ELSE 0 END as win_rate
+            FROM whale_incremental_stats
+            GROUP BY timeframe
+            ORDER BY net_pnl DESC
+        """)
+        by_timeframe = {}
+        for row in cursor:
+            by_timeframe[row[0]] = {
+                'whale_count': row[1],
+                'trades': row[2],
+                'wins': row[3],
+                'losses': row[4],
+                'net_pnl': row[5] or 0,
+                'win_rate': round(row[6] or 0, 1)
+            }
+
+        # Top performing whales we could have copied
+        cursor = self.conn.execute("""
+            SELECT
+                address,
+                timeframe,
+                trades,
+                wins,
+                losses,
+                net_pnl,
+                CASE WHEN trades > 0 THEN CAST(wins AS REAL) / trades * 100 ELSE 0 END as win_rate
+            FROM whale_incremental_stats
+            WHERE trades >= 3
+            ORDER BY net_pnl DESC
+            LIMIT 10
+        """)
+        top_performers = []
+        for row in cursor:
+            top_performers.append({
+                'address': row[0],
+                'timeframe': row[1],
+                'trades': row[2],
+                'wins': row[3],
+                'losses': row[4],
+                'net_pnl': row[5] or 0,
+                'win_rate': round(row[6] or 0, 1)
+            })
+
+        # Worst performers (whales to avoid)
+        cursor = self.conn.execute("""
+            SELECT
+                address,
+                timeframe,
+                trades,
+                wins,
+                losses,
+                net_pnl,
+                CASE WHEN trades > 0 THEN CAST(wins AS REAL) / trades * 100 ELSE 0 END as win_rate
+            FROM whale_incremental_stats
+            WHERE trades >= 3
+            ORDER BY net_pnl ASC
+            LIMIT 10
+        """)
+        worst_performers = []
+        for row in cursor:
+            worst_performers.append({
+                'address': row[0],
+                'timeframe': row[1],
+                'trades': row[2],
+                'wins': row[3],
+                'losses': row[4],
+                'net_pnl': row[5] or 0,
+                'win_rate': round(row[6] or 0, 1)
+            })
+
+        # Pending observations count
+        pending = self.get_pending_trades_summary()
+
+        total_trades = overall[2] or 0
+        total_wins = overall[3] or 0
+        overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
+
+        return {
+            'summary': {
+                'unique_whales_observed': overall[0] or 0,
+                'total_resolved_trades': overall[2] or 0,
+                'overall_win_rate': round(overall_win_rate, 1),
+                'total_pnl_observed': round(overall[4] or 0, 2),
+                'pending_observations': pending.get('total', 0)
+            },
+            'by_timeframe': by_timeframe,
+            'top_performers': top_performers,
+            'worst_performers': worst_performers,
+            'insights': {
+                'best_timeframe': max(by_timeframe.items(), key=lambda x: x[1]['net_pnl'])[0] if by_timeframe else None,
+                'most_active_timeframe': max(by_timeframe.items(), key=lambda x: x[1]['trades'])[0] if by_timeframe else None,
+                'missed_profit': round(sum(w['net_pnl'] for w in top_performers if w['net_pnl'] > 0), 2),
+                'avoided_loss': round(abs(sum(w['net_pnl'] for w in worst_performers if w['net_pnl'] < 0)), 2)
+            }
+        }
+
     # =========================================================================
     # WHALE PENDING TRADES (for resolution-based quality tracking)
     # =========================================================================
