@@ -296,9 +296,12 @@ class MultiTimeframeStrategy:
             }
         """
 
-        # Detect market timeframe
-        market = trade_data.get('market', trade_data.get('market_question', ''))
-        market_timeframe = self.detect_market_timeframe(market)
+        # Use timeframe from trade_data if already extracted (from Gamma API recurrence)
+        # Otherwise fall back to parsing market name (less reliable)
+        market_timeframe = trade_data.get('timeframe', 'unknown')
+        if market_timeframe == 'unknown':
+            market = trade_data.get('market', trade_data.get('market_question', ''))
+            market_timeframe = self.detect_market_timeframe(market)
 
         # Filter out unknown timeframes (weekly, monthly, pre-market, etc.)
         if market_timeframe == 'unknown':

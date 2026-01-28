@@ -590,6 +590,7 @@ class SmallCapitalSystem:
 
                                     # v3: Extract timeframe from recurrence
                                     timeframe_from_gamma = self._extract_timeframe_from_gamma(gamma_market_data)
+                                    trade_data['timeframe'] = timeframe_from_gamma or 'unknown'
 
                                     # Cache with timeframe
                                     db.cache_token_timeframe(str(token_id), timeframe_from_gamma or 'unknown', question[:200])
