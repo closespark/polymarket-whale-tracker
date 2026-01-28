@@ -903,14 +903,22 @@ class SmallCapitalSystem:
         # Apply tier multiplier
         position_size = position_size * position_multiplier
 
-        # Check if we have capital
+        # Check if we have capital (only enforce in live mode)
+        is_live_mode = config.AUTO_COPY_ENABLED and self.order_executor and self.order_executor.initialized
+
         if position_size > self.current_capital * 0.15:  # Max 15% per trade
             position_size = self.current_capital * 0.15
-        
-        if position_size < 2:  # Minimum $2 to make sense
-            print(f"   ⚠️  Capital too low for this trade (${self.current_capital:.2f})")
-            return
-        
+
+        if position_size < 2:
+            if is_live_mode:
+                # In live mode, reject trades that are too small
+                print(f"   ⚠️  Capital too low for this trade (${self.current_capital:.2f})")
+                return
+            else:
+                # In dry run mode, use a reasonable simulated position size
+                position_size = 5.0  # $5 simulated position for tracking
+                print(f"   📊 Dry run: Using simulated ${position_size:.2f} position (Kelly too small)")
+
         # COPY THE TRADE
         print(f"\n{'='*80}")
         print(f"🎯 HIGH CONFIDENCE TRADE")
