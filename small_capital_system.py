@@ -904,9 +904,26 @@ class SmallCapitalSystem:
                     if token_id and not trade_data.get('market_question'):
                         db = self.discovery.db
                         market_info = db.get_cached_market_info(str(token_id))
-                        if market_info:
+                        if market_info and market_info.get('question'):
                             trade_data['market_question'] = market_info.get('question', '')
                             trade_data['market'] = market_info.get('question', '')
+                        else:
+                            # Try to fetch from Gamma API on-demand
+                            try:
+                                import requests
+                                url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
+                                response = requests.get(url, timeout=5)
+                                if response.status_code == 200:
+                                    markets = response.json()
+                                    if isinstance(markets, list) and markets:
+                                        question = markets[0].get('question', '')
+                                        if question:
+                                            trade_data['market_question'] = question
+                                            trade_data['market'] = question
+                                            # Cache for future use
+                                            db.cache_token_timeframe(str(token_id), 'unknown', question[:200])
+                            except Exception:
+                                pass  # Silently skip API failures
 
                     # v2: Track trade for correlation detection
                     market = trade_data.get('market', trade_data.get('market_question', ''))
