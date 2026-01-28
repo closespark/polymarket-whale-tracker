@@ -1036,7 +1036,8 @@ class SmallCapitalSystem:
         if total_exposure > self.current_capital * 0.60:
             print(f"⚠️ High exposure: ${total_exposure:.2f} pending ({total_exposure/self.current_capital*100:.0f}% of capital)")
 
-        if self.current_capital < self.starting_capital * 0.70:
+        # Stop-loss only applies in live trading mode, not dry run
+        if config.AUTO_COPY_ENABLED and self.current_capital < self.starting_capital * 0.70:
             print("\n" + "="*80)
             print("🛑 STOP-LOSS TRIGGERED")
             print("="*80)
