@@ -770,7 +770,7 @@ class TradeDatabase:
 
                 batch.append((
                     address.lower(), best_timeframe, num_tokens, win_tokens, loss_tokens,
-                    total_pnl, total_pnl, tf_win_rate
+                    0, total_pnl, tf_win_rate  # volume=0 (not in CSV), profit=total_pnl
                 ))
                 whales_loaded += 1
 
