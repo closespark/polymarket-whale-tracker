@@ -151,6 +151,34 @@ class TradeDatabase:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_resolution ON whale_pending_trades(expected_resolution)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_token ON whale_pending_trades(token_id)")
 
+        # =======================================================================
+        # DRY_RUN_POSITIONS: Simulated positions for paper trading
+        # Persists across restarts so we can track resolution
+        # =======================================================================
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS dry_run_positions (
+                id TEXT PRIMARY KEY,
+                token_id TEXT NOT NULL,
+                whale_address TEXT,
+                side TEXT NOT NULL,
+                position_size REAL NOT NULL,
+                confidence REAL NOT NULL,
+                market_timeframe TEXT,
+                market_question TEXT,
+                entry_price REAL,
+                opened_at TEXT NOT NULL,
+                expected_resolution TEXT,
+                status TEXT DEFAULT 'PENDING',
+                resolved_at TEXT,
+                market_outcome TEXT,
+                is_win INTEGER,
+                pnl REAL,
+                extra_data TEXT
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_dryrun_status ON dry_run_positions(status)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_dryrun_token ON dry_run_positions(token_id)")
+
         self.conn.commit()
         print(f"Trade database initialized: {self.db_path}")
 
@@ -595,6 +623,163 @@ class TradeDatabase:
             'unique_whales': row[2] or 0,
             'ready_to_resolve': row[3] or 0
         }
+
+    # =========================================================================
+    # DRY RUN POSITIONS (Paper Trading Persistence)
+    # =========================================================================
+
+    def save_dry_run_position(self, position: dict):
+        """Save a dry run position to the database."""
+        import json
+        with self._lock:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO dry_run_positions (
+                    id, token_id, whale_address, side, position_size, confidence,
+                    market_timeframe, market_question, entry_price, opened_at,
+                    expected_resolution, status, resolved_at, market_outcome,
+                    is_win, pnl, extra_data
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                position.get('id'),
+                position.get('token_id'),
+                position.get('whale_address'),
+                position.get('side'),
+                position.get('position_size'),
+                position.get('confidence'),
+                position.get('market_timeframe'),
+                position.get('market_question'),
+                position.get('entry_price'),
+                position.get('opened_at'),
+                position.get('expected_resolution'),
+                position.get('status', 'PENDING'),
+                position.get('resolved_at'),
+                position.get('market_outcome'),
+                1 if position.get('is_win') else 0 if position.get('is_win') is False else None,
+                position.get('pnl'),
+                json.dumps(position.get('extra_data', {})) if position.get('extra_data') else None
+            ))
+            self.conn.commit()
+
+    def get_pending_dry_run_positions(self) -> list:
+        """Get all pending (unresolved) dry run positions."""
+        import json
+        cursor = self.conn.execute("""
+            SELECT id, token_id, whale_address, side, position_size, confidence,
+                   market_timeframe, market_question, entry_price, opened_at,
+                   expected_resolution, status, extra_data
+            FROM dry_run_positions
+            WHERE status = 'PENDING'
+            ORDER BY opened_at ASC
+        """)
+        positions = []
+        for row in cursor:
+            pos = {
+                'id': row[0],
+                'token_id': row[1],
+                'whale_address': row[2],
+                'side': row[3],
+                'position_size': row[4],
+                'confidence': row[5],
+                'market_timeframe': row[6],
+                'market_question': row[7],
+                'entry_price': row[8],
+                'opened_at': row[9],
+                'expected_resolution': row[10],
+                'status': row[11]
+            }
+            if row[12]:
+                try:
+                    pos['extra_data'] = json.loads(row[12])
+                except:
+                    pass
+            positions.append(pos)
+        return positions
+
+    def resolve_dry_run_position(self, position_id: str, market_outcome: str, pnl: float, is_win: bool):
+        """Mark a dry run position as resolved."""
+        from datetime import datetime
+        with self._lock:
+            self.conn.execute("""
+                UPDATE dry_run_positions SET
+                    status = 'RESOLVED',
+                    resolved_at = ?,
+                    market_outcome = ?,
+                    is_win = ?,
+                    pnl = ?
+                WHERE id = ?
+            """, (
+                datetime.now().isoformat(),
+                market_outcome,
+                1 if is_win else 0,
+                pnl,
+                position_id
+            ))
+            self.conn.commit()
+
+    def get_dry_run_summary(self) -> dict:
+        """Get summary statistics for dry run positions."""
+        cursor = self.conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status = 'RESOLVED' THEN 1 ELSE 0 END) as resolved,
+                SUM(CASE WHEN is_win = 1 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN is_win = 0 AND status = 'RESOLVED' THEN 1 ELSE 0 END) as losses,
+                SUM(CASE WHEN status = 'PENDING' THEN position_size ELSE 0 END) as pending_exposure,
+                SUM(CASE WHEN status = 'RESOLVED' THEN pnl ELSE 0 END) as realized_pnl
+            FROM dry_run_positions
+        """)
+        row = cursor.fetchone()
+        return {
+            'total': row[0] or 0,
+            'pending': row[1] or 0,
+            'resolved': row[2] or 0,
+            'wins': row[3] or 0,
+            'losses': row[4] or 0,
+            'pending_exposure': row[5] or 0.0,
+            'realized_pnl': row[6] or 0.0,
+            'win_rate': (row[3] / row[2] * 100) if row[2] and row[2] > 0 else 0.0
+        }
+
+    def get_resolved_dry_run_positions(self) -> list:
+        """Get all resolved dry run positions for analytics."""
+        import json
+        cursor = self.conn.execute("""
+            SELECT id, token_id, whale_address, side, position_size, confidence,
+                   market_timeframe, market_question, entry_price, opened_at,
+                   expected_resolution, status, resolved_at, market_outcome,
+                   is_win, pnl, extra_data
+            FROM dry_run_positions
+            WHERE status = 'RESOLVED'
+            ORDER BY resolved_at DESC
+        """)
+        positions = []
+        for row in cursor:
+            pos = {
+                'id': row[0],
+                'token_id': row[1],
+                'whale_address': row[2],
+                'side': row[3],
+                'position_size': row[4],
+                'confidence': row[5],
+                'market_timeframe': row[6],
+                'market_question': row[7],
+                'entry_price': row[8],
+                'opened_at': row[9],
+                'expected_resolution': row[10],
+                'status': row[11],
+                'resolved_at': row[12],
+                'market_outcome': row[13],
+                'is_win': bool(row[14]) if row[14] is not None else None,
+                'pnl': row[15]
+            }
+            if row[16]:
+                try:
+                    pos['extra_data'] = json.loads(row[16])
+                except:
+                    pass
+            positions.append(pos)
+        return positions
 
     # =========================================================================
     # CSV LOADING

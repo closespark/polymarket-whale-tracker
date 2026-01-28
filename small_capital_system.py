@@ -59,10 +59,13 @@ class PendingPositionTracker:
 
     Resolution uses ACTUAL market outcomes from MarketLifecycle tracker.
     Falls back to simulation only if API doesn't return outcome.
+
+    PERSISTENCE: Positions are saved to SQLite database so they survive restarts.
     """
 
-    def __init__(self, system):
+    def __init__(self, system, db=None):
         self.system = system
+        self.db = db  # TradeDatabase instance for persistence
         self.pending_positions = []  # List of pending position dicts
         self.resolved_positions = []  # History of resolved positions
         self.market_lifecycle = get_market_lifecycle()  # For actual resolutions
@@ -70,6 +73,70 @@ class PendingPositionTracker:
         # Check if we should clear positions on startup
         if os.environ.get('CLEAR_POSITIONS', 'false').lower() == 'true':
             print("🧹 CLEAR_POSITIONS=true - starting with fresh position state")
+        else:
+            # Load existing positions from database
+            self._load_from_database()
+
+    def _load_from_database(self):
+        """Load pending positions from database on startup."""
+        if not self.db:
+            return
+
+        try:
+            db_positions = self.db.get_pending_dry_run_positions()
+            if db_positions:
+                for db_pos in db_positions:
+                    # Convert database format to in-memory format
+                    position = {
+                        'id': db_pos['id'],
+                        'opened_at': datetime.fromisoformat(db_pos['opened_at']) if db_pos.get('opened_at') else datetime.now(),
+                        'expected_resolution': datetime.fromisoformat(db_pos['expected_resolution']) if db_pos.get('expected_resolution') else datetime.now(),
+                        'market_timeframe': db_pos.get('market_timeframe', '15min'),
+                        'position_size': db_pos.get('position_size', 0),
+                        'confidence': db_pos.get('confidence', 0),
+                        'whale_address': db_pos.get('whale_address', ''),
+                        'whale_win_rate': db_pos.get('extra_data', {}).get('whale_win_rate', 0.72) if db_pos.get('extra_data') else 0.72,
+                        'side': db_pos.get('side', 'BUY'),
+                        'market': db_pos.get('market_question', 'Unknown'),
+                        'token_id': db_pos.get('token_id', ''),
+                        'tier': db_pos.get('extra_data', {}).get('tier', 'unknown') if db_pos.get('extra_data') else 'unknown',
+                        'trade_data': db_pos.get('extra_data', {}).get('trade_data', {}) if db_pos.get('extra_data') else {},
+                        'status': 'pending'
+                    }
+                    self.pending_positions.append(position)
+
+                print(f"📂 Restored {len(db_positions)} pending dry-run positions from database")
+        except Exception as e:
+            print(f"   ⚠️ Error loading positions from database: {e}")
+
+    def _save_to_database(self, position: dict):
+        """Save a position to the database."""
+        if not self.db:
+            return
+
+        try:
+            db_position = {
+                'id': position['id'],
+                'token_id': position.get('token_id', ''),
+                'whale_address': position.get('whale_address', ''),
+                'side': position.get('side', 'BUY'),
+                'position_size': position.get('position_size', 0),
+                'confidence': position.get('confidence', 0),
+                'market_timeframe': position.get('market_timeframe', '15min'),
+                'market_question': position.get('market', ''),
+                'entry_price': position.get('trade_data', {}).get('price'),
+                'opened_at': position.get('opened_at').isoformat() if isinstance(position.get('opened_at'), datetime) else position.get('opened_at'),
+                'expected_resolution': position.get('expected_resolution').isoformat() if isinstance(position.get('expected_resolution'), datetime) else position.get('expected_resolution'),
+                'status': 'PENDING',
+                'extra_data': {
+                    'whale_win_rate': position.get('whale_win_rate', 0.72),
+                    'tier': position.get('tier', 'unknown'),
+                    'trade_data': position.get('trade_data', {})
+                }
+            }
+            self.db.save_dry_run_position(db_position)
+        except Exception as e:
+            print(f"   ⚠️ Error saving position to database: {e}")
 
     def add_position(self, trade_data: dict, position_size: float, confidence: float):
         """
@@ -101,6 +168,9 @@ class PendingPositionTracker:
         }
 
         self.pending_positions.append(position)
+
+        # Persist to database
+        self._save_to_database(position)
 
         print(f"\n📋 POSITION OPENED (pending resolution)")
         print(f"   Size: ${position_size:.2f}")
@@ -192,6 +262,14 @@ class PendingPositionTracker:
         position['profit'] = profit
 
         self.resolved_positions.append(position)
+
+        # Persist resolution to database
+        if self.db:
+            try:
+                market_outcome = actual_outcome if actual_outcome else ('YES' if is_win else 'NO')
+                self.db.resolve_dry_run_position(position['id'], market_outcome, profit, is_win)
+            except Exception as e:
+                print(f"   ⚠️ Error updating position in database: {e}")
 
         # Update system stats
         self._update_system_stats(position, profit, is_win)
@@ -347,7 +425,9 @@ class SmallCapitalSystem:
         self.dashboard = EmbeddedDashboard(self)
 
         # v3: Pending position tracker (profit only on market resolution)
-        self.position_tracker = PendingPositionTracker(self)
+        # Pass database for persistence across restarts
+        db = getattr(self.discovery, 'db', None)
+        self.position_tracker = PendingPositionTracker(self, db=db)
 
         # v4: Live trading components (initialized when needed)
         self.order_executor = None
@@ -600,9 +680,11 @@ class SmallCapitalSystem:
                                 # Track API failures for monitoring
                                 self.quality_stats['api_failures'] = self.quality_stats.get('api_failures', 0) + 1
 
-                    # Skip non-recurring markets (no timeframe = not 15min/hourly/4hour/daily)
-                    if trade_data.get('timeframe', 'unknown') == 'unknown':
-                        return  # Silently skip - not a recurring market
+                    # Skip non-recurring markets - whitelist only configured tiers
+                    VALID_TIMEFRAMES = {'15min', 'hourly', '4hour', 'daily'}
+                    market_tf = trade_data.get('timeframe', 'unknown')
+                    if market_tf not in VALID_TIMEFRAMES:
+                        return  # Silently skip - not a configured recurring market
 
                     # v2: Track trade for correlation detection
                     market = trade_data.get('market', trade_data.get('market_question', ''))
@@ -800,6 +882,19 @@ class SmallCapitalSystem:
         # Execute (or simulate)
         if config.AUTO_COPY_ENABLED and self.order_executor and self.order_executor.initialized:
             # LIVE TRADING MODE
+            # Check available capital (total - already committed in pending positions)
+            if self.position_manager:
+                summary = self.position_manager.get_position_summary()
+                committed_capital = summary.get('pending_exposure', 0)
+                available_capital = self.current_capital - committed_capital
+
+                if position_size > available_capital:
+                    print(f"\n⚠️ INSUFFICIENT CAPITAL")
+                    print(f"   Requested: ${position_size:.2f}")
+                    print(f"   Available: ${available_capital:.2f} (${self.current_capital:.2f} - ${committed_capital:.2f} committed)")
+                    print(f"   Skipping trade until positions resolve\n")
+                    return
+
             print(f"🟢 LIVE MODE - Executing real trade...")
 
             try:
