@@ -12,6 +12,7 @@ Access via SSH tunnel from Render:
 Then open http://localhost:8080 in browser
 """
 
+import asyncio
 from datetime import datetime
 from aiohttp import web
 
@@ -156,7 +157,8 @@ class EmbeddedDashboard:
             return web.json_response({'error': 'No database available'})
 
         try:
-            summary = db.get_dry_run_summary()
+            # Use asyncio.to_thread to prevent blocking the event loop
+            summary = await asyncio.to_thread(db.get_dry_run_summary)
             return web.json_response({
                 'total_positions': summary.get('total', 0),
                 'pending': summary.get('pending', 0),
@@ -177,7 +179,8 @@ class EmbeddedDashboard:
             return web.json_response({'error': 'No database available'})
 
         try:
-            summary = db.get_pending_trades_summary()
+            # Use asyncio.to_thread to prevent blocking the event loop
+            summary = await asyncio.to_thread(db.get_pending_trades_summary)
             return web.json_response({
                 'total_observations': summary.get('total', 0),
                 'unique_tokens': summary.get('unique_tokens', 0),
@@ -194,7 +197,8 @@ class EmbeddedDashboard:
             return web.json_response({'error': 'No database available'})
 
         try:
-            analytics = db.get_whale_observations_analytics()
+            # Use asyncio.to_thread to prevent blocking the event loop
+            analytics = await asyncio.to_thread(db.get_whale_observations_analytics)
             return web.json_response(analytics)
         except Exception as e:
             return web.json_response({'error': str(e)})
