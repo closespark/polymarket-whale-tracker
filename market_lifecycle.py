@@ -324,12 +324,31 @@ class MarketLifecycle:
                 market.get('winning_outcome')
             )
 
+            # Check outcomePrices if outcome not directly available
+            if not outcome:
+                outcomes = market.get('outcomes') or []
+                if isinstance(outcomes, str):
+                    outcomes = json.loads(outcomes)
+
+                op = market.get('outcomePrices')
+                if op:
+                    if isinstance(op, str):
+                        op = json.loads(op)
+                    if isinstance(op, (list, tuple)):
+                        for i, p in enumerate(op):
+                            if i < len(outcomes):
+                                if p == 1 or p == 1.0 or str(p).strip() == "1":
+                                    outcome = outcomes[i]
+                                    break
+
             if outcome:
                 # Normalize
-                if str(outcome).lower() in ['yes', 'true', '1']:
+                if str(outcome).lower() in ['yes', 'true', '1', 'up']:
                     return 'YES'
-                elif str(outcome).lower() in ['no', 'false', '0']:
+                elif str(outcome).lower() in ['no', 'false', '0', 'down']:
                     return 'NO'
+                else:
+                    return str(outcome).upper()
 
             return None
 
@@ -369,11 +388,29 @@ class MarketLifecycle:
                             market_data.get('resolution') or
                             market_data.get('winning_outcome')
                         )
+
+                        # Check outcomePrices if outcome not directly available
+                        if not outcome:
+                            outcomes = market_data.get('outcomes') or []
+                            if isinstance(outcomes, str):
+                                outcomes = json.loads(outcomes)
+
+                            op = market_data.get('outcomePrices')
+                            if op:
+                                if isinstance(op, str):
+                                    op = json.loads(op)
+                                if isinstance(op, (list, tuple)):
+                                    for i, p in enumerate(op):
+                                        if i < len(outcomes):
+                                            if p == 1 or p == 1.0 or str(p).strip() == "1":
+                                                outcome = outcomes[i]
+                                                break
+
                         if outcome:
                             # Normalize outcome
-                            if str(outcome).lower() in ['yes', 'true', '1']:
+                            if str(outcome).lower() in ['yes', 'true', '1', 'up']:
                                 normalized = 'YES'
-                            elif str(outcome).lower() in ['no', 'false', '0']:
+                            elif str(outcome).lower() in ['no', 'false', '0', 'down']:
                                 normalized = 'NO'
                             else:
                                 normalized = str(outcome).upper()

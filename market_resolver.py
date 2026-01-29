@@ -193,12 +193,32 @@ class MarketResolver:
                 market.get('winning_outcome')
             )
 
+            # Check outcomePrices if outcome not directly available
+            if not outcome:
+                import json
+                outcomes = market.get('outcomes') or []
+                if isinstance(outcomes, str):
+                    outcomes = json.loads(outcomes)
+
+                op = market.get('outcomePrices')
+                if op:
+                    if isinstance(op, str):
+                        op = json.loads(op)
+                    if isinstance(op, (list, tuple)):
+                        for i, p in enumerate(op):
+                            if i < len(outcomes):
+                                if p == 1 or p == 1.0 or str(p).strip() == "1":
+                                    outcome = outcomes[i]
+                                    break
+
             if outcome:
                 # Normalize outcome
-                if outcome.lower() in ['yes', 'true', '1']:
+                if str(outcome).lower() in ['yes', 'true', '1', 'up']:
                     outcome = 'YES'
-                elif outcome.lower() in ['no', 'false', '0']:
+                elif str(outcome).lower() in ['no', 'false', '0', 'down']:
                     outcome = 'NO'
+                else:
+                    outcome = str(outcome).upper()
 
                 # Cache result
                 self.resolution_cache[cache_key] = {

@@ -279,20 +279,27 @@ class PendingPositionTracker:
             self.pending_positions.append(position)
             return
 
-        # Calculate profit/loss
+        # Calculate profit/loss using REAL entry price
         position_size = position['position_size']
-        confidence = position.get('confidence', 85)  # Get from position, not undefined local
-        if is_win:
-            # Win: profit based on confidence tier
-            if confidence > 95:
-                profit = position_size * 0.35
-            elif confidence > 92:
-                profit = position_size * 0.25
+        entry_price = position.get('trade_data', {}).get('price', 0)
+
+        if entry_price and entry_price > 0:
+            # Real P&L calculation: shares = position_size / entry_price
+            # Win: shares * $1 - position_size = position_size * (1/entry_price - 1)
+            # Loss: -position_size (paid for shares worth $0)
+            shares = position_size / entry_price
+            if is_win:
+                profit = shares * 1.0 - position_size  # Shares redeem for $1 each
             else:
-                profit = position_size * 0.15
+                profit = -position_size  # Shares worth $0
+            print(f"   📊 P&L calc: ${position_size:.2f} at {entry_price:.3f} = {shares:.2f} shares")
         else:
-            # Loss: lose the position
-            profit = -position_size
+            # No entry price available - use position size only
+            if is_win:
+                profit = position_size * 0.15  # Conservative estimate
+            else:
+                profit = -position_size
+            print(f"   ⚠️ No entry price - using estimate")
 
         # Update position record
         position['status'] = 'resolved'
