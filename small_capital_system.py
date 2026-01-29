@@ -174,6 +174,22 @@ class PendingPositionTracker:
         # Use actual market end_date from Gamma API if available
         # This is the REAL resolution time, not a calculated estimate
         end_date_str = trade_data.get('end_date')
+
+        # If no end_date, try to fetch it directly from Gamma
+        if not end_date_str and token_id:
+            try:
+                import requests
+                url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    markets = response.json()
+                    if markets:
+                        end_date_str = markets[0].get('endDate') or markets[0].get('end_date')
+                        if end_date_str:
+                            print(f"   📅 Fetched end_date from Gamma: {end_date_str}")
+            except Exception as e:
+                print(f"   ⚠️ Failed to fetch end_date: {e}")
+
         if end_date_str:
             try:
                 # Parse ISO format from Gamma API
@@ -187,12 +203,15 @@ class PendingPositionTracker:
                         expected_resolution = datetime.strptime(end_date_str, '%Y-%m-%d %H:%M:%S')
                 else:
                     expected_resolution = end_date_str  # Already a datetime
-            except (ValueError, TypeError):
+                print(f"   📅 Using actual market end time: {expected_resolution}")
+            except (ValueError, TypeError) as e:
                 # Fallback to calculated resolution
+                print(f"   ⚠️ Failed to parse end_date '{end_date_str}': {e}")
                 resolution_delay = TIMEFRAME_DURATIONS.get(market_timeframe, timedelta(minutes=15))
                 expected_resolution = datetime.now() + resolution_delay
         else:
-            # Fallback: calculate from timeframe (less accurate)
+            # Fallback: calculate from timeframe (INACCURATE)
+            print(f"   ⚠️ No end_date available - using calculated time (inaccurate)")
             resolution_delay = TIMEFRAME_DURATIONS.get(market_timeframe, timedelta(minutes=15))
             expected_resolution = datetime.now() + resolution_delay
 
