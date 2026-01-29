@@ -1882,12 +1882,17 @@ class SmallCapitalSystem:
                 print(f"📂 Loading quality whales from {quality_csv_path}...")
                 db.load_whale_quality_csv(quality_csv_path)
 
-            # Load tiers from database into memory
+            # PRUNE underperforming whales BEFORE loading into memory
+            print(f"\n🧹 Pruning whales below 80% win rate...")
+            pruned = db.prune_underperforming_whales(min_win_rate=0.80, min_trades=5)
+            print(f"   Removed {pruned} underperforming whales")
+
+            # Load tiers from database into memory (now only 80%+ whales)
             if not self.multi_tf_strategy.load_from_database(db):
                 print("⚠️ Failed to load tiers from database")
                 return
 
-            print(f"\n📊 MULTI-TIMEFRAME TIERS POPULATED:")
+            print(f"\n📊 MULTI-TIMEFRAME TIERS POPULATED (80%+ win rate only):")
             total_whales = 0
             whale_addresses = []
             for tier_name, tier in self.multi_tf_strategy.tiers.items():

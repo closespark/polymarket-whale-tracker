@@ -133,18 +133,21 @@ class EmbeddedDashboard:
         })
 
     async def api_whales(self, request):
-        """Return all monitored whales with tier info"""
+        """Return all monitored whales with tier info - filtered to 80%+ win rate only"""
         whales = []
         for tier_name, tier in self.system.multi_tf_strategy.tiers.items():
             for whale in tier.whales:
-                whales.append({
-                    'address': whale.get('address', ''),
-                    'tier': tier_name,
-                    'win_rate': round(whale.get('win_rate', 0) * 100, 1),
-                    'trade_count': whale.get('trade_count', 0),
-                    'profit': round(whale.get('profit', whale.get('total_profit', 0)), 2),
-                    'specialty': whale.get('specialty', tier_name)
-                })
+                win_rate = whale.get('win_rate', 0)
+                # Only show whales with 80%+ win rate
+                if win_rate >= 0.80:
+                    whales.append({
+                        'address': whale.get('address', ''),
+                        'tier': tier_name,
+                        'win_rate': round(win_rate * 100, 1),
+                        'trade_count': whale.get('trade_count', 0),
+                        'profit': round(whale.get('profit', whale.get('total_profit', 0)), 2),
+                        'specialty': whale.get('specialty', tier_name)
+                    })
         return web.json_response({'whales': whales, 'total': len(whales)})
 
     async def api_tiers(self, request):
