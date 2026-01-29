@@ -147,18 +147,25 @@ class PendingPositionTracker:
 
     def add_position(self, trade_data: dict, position_size: float, confidence: float):
         """
-        Add a new pending position
+        Add a new pending position with atomic duplicate prevention.
+
+        Uses double-check pattern to prevent race conditions:
+        1. In-memory check (fast, catches same-process duplicates)
+        2. Database check with lock (catches cross-process/async duplicates)
 
         Args:
             trade_data: Original trade data from whale detection
             position_size: Our position size in USDC
             confidence: Confidence score used for this trade
         """
-        # Check for duplicate position on same token
         token_id = trade_data.get('token_id', trade_data.get('asset_id', ''))
-        if token_id and self.db and self.db.has_pending_position_for_token(token_id):
-            market = trade_data.get('market_question', trade_data.get('market', 'Unknown'))
-            print(f"   ⚠️ Skipping duplicate - already have pending position on: {market[:50]}")
+        market = trade_data.get('market_question', trade_data.get('market', 'Unknown'))
+
+        # Check 1: In-memory duplicate check (fast, no lock needed)
+        # This catches duplicates from concurrent async tasks in the same process
+        if token_id and any(p.get('token_id') == token_id and p.get('status') == 'pending'
+                           for p in self.pending_positions):
+            print(f"   ⚠️ Skipping duplicate (in-memory) - already have pending position on: {market[:50]}")
             return None
 
         market_timeframe = trade_data.get('market_timeframe', '15min')
@@ -199,16 +206,29 @@ class PendingPositionTracker:
             'whale_win_rate': trade_data.get('whale_win_rate', 0.72),
             'side': trade_data.get('side', trade_data.get('net_side', 'BUY')),
             'market': trade_data.get('market_question', trade_data.get('market', 'Unknown')),
-            'token_id': trade_data.get('token_id', trade_data.get('asset_id', '')),
+            'token_id': token_id,
             'tier': trade_data.get('tier', 'unknown'),
             'trade_data': trade_data,
             'status': 'pending'
         }
 
-        self.pending_positions.append(position)
+        # Check 2: Atomic database check + insert under lock
+        # This prevents race conditions where two trades pass the in-memory check
+        # before either is saved to the database
+        if token_id and self.db:
+            with self.db._lock:
+                # Re-check database while holding lock
+                if self.db.has_pending_position_for_token(token_id):
+                    print(f"   ⚠️ Skipping duplicate (database) - already have pending position on: {market[:50]}")
+                    return None
 
-        # Persist to database
-        self._save_to_database(position)
+                # Add to in-memory list AND save to database while holding lock
+                # This ensures atomicity - no other thread can check between our check and insert
+                self.pending_positions.append(position)
+                self._save_to_database(position)
+        else:
+            # No database - just add to memory (less safe but functional)
+            self.pending_positions.append(position)
 
         print(f"\n📋 POSITION OPENED (pending resolution)")
         print(f"   Size: ${position_size:.2f}")
@@ -1050,20 +1070,39 @@ class SmallCapitalSystem:
     
     def calculate_position_size(self, confidence, whale_data=None):
         """
-        Kelly Criterion position sizing
+        Position sizing - Fixed or Kelly Criterion based on config.
 
-        Uses mathematically optimal sizing based on:
-        - Whale's historical win rate
-        - Trade confidence
-        - Current drawdown level
-        - Exposure limits
+        If FIXED_POSITION_SIZE is set in config, uses flat dollar amount.
+        Otherwise uses Kelly Criterion for mathematically optimal sizing.
 
-        Returns optimal position size in dollars
+        Returns position size in dollars
         """
 
-        # Get whale stats for Kelly calculation
+        # Get whale stats for calculations
         if whale_data is None:
             whale_data = {'win_rate': 0.72}  # Default assumption
+
+        # Check for fixed sizing mode (cleaner data for strategy validation)
+        if hasattr(config, 'FIXED_POSITION_SIZE') and config.FIXED_POSITION_SIZE:
+            position = config.FIXED_POSITION_SIZE
+            print(f"   📊 Fixed sizing: ${position:.2f}")
+
+            # Still apply risk manager constraints
+            trade_data = {'whale_address': whale_data.get('address', '')}
+            risk_check = self.risk_manager.check_trade(trade_data, position)
+
+            if not risk_check['allowed']:
+                print(f"   ⚠️ Risk check blocked: {risk_check['reasons']}")
+                return 0
+
+            return risk_check['size']
+
+        # Kelly Criterion position sizing (dynamic)
+        # Uses mathematically optimal sizing based on:
+        # - Whale's historical win rate
+        # - Trade confidence
+        # - Current drawdown level
+        # - Exposure limits
 
         # Calculate Kelly-optimal position
         result = self.position_sizer.calculate_optimal_position(
