@@ -281,6 +281,7 @@ class PendingPositionTracker:
 
         # Calculate profit/loss
         position_size = position['position_size']
+        confidence = position.get('confidence', 85)  # Get from position, not undefined local
         if is_win:
             # Win: profit based on confidence tier
             if confidence > 95:
