@@ -277,16 +277,10 @@ class PendingPositionTracker:
 
             print(f"   📊 Using ACTUAL outcome: {actual_outcome} (side={side})")
         else:
-            # Fall back to simulation based on whale's win rate
-            whale_win_rate = position['whale_win_rate']
-            confidence = position['confidence']
-
-            # Adjust probability based on confidence
-            adjusted_win_prob = whale_win_rate * (0.9 + (confidence / 1000))
-            adjusted_win_prob = min(adjusted_win_prob, 0.95)
-
-            is_win = random.random() < adjusted_win_prob
-            print(f"   ⚠️ No API outcome - using simulated (win_prob={adjusted_win_prob:.1%})")
+            # NO SIMULATION - put position back and retry later
+            print(f"   ❌ Could not fetch market outcome from API - will retry")
+            self.pending_positions.append(position)
+            return
 
         # Calculate profit/loss
         position_size = position['position_size']

@@ -341,6 +341,7 @@ class MarketLifecycle:
         Get market resolution outcome.
 
         Returns 'YES', 'NO', or None if not resolved.
+        ALWAYS fetches from API if not in cache - NO SIMULATION.
         """
         # Check cache first
         if token_id in self.resolution_cache:
@@ -350,6 +351,42 @@ class MarketLifecycle:
         market = self.markets.get(token_id)
         if market and market.get('resolved'):
             return market.get('outcome')
+
+        # NOT IN CACHE - fetch directly from Gamma API
+        try:
+            url = f"{self.gamma_api}/markets"
+            params = {'clob_token_ids': token_id}
+            response = requests.get(url, params=params, timeout=10)
+
+            if response.status_code == 200:
+                markets = response.json()
+                if markets:
+                    market_data = markets[0]
+                    resolved = market_data.get('resolved', False) or market_data.get('closed', False)
+                    if resolved:
+                        outcome = (
+                            market_data.get('outcome') or
+                            market_data.get('resolution') or
+                            market_data.get('winning_outcome')
+                        )
+                        if outcome:
+                            # Normalize outcome
+                            if str(outcome).lower() in ['yes', 'true', '1']:
+                                normalized = 'YES'
+                            elif str(outcome).lower() in ['no', 'false', '0']:
+                                normalized = 'NO'
+                            else:
+                                normalized = str(outcome).upper()
+
+                            # Cache it
+                            self.resolution_cache[token_id] = {
+                                'outcome': normalized,
+                                'resolved_at': datetime.now()
+                            }
+                            print(f"   ✅ Fetched resolution from API: {normalized}")
+                            return normalized
+        except Exception as e:
+            print(f"   ⚠️ API error fetching resolution for {token_id[:16]}: {e}")
 
         return None
 
