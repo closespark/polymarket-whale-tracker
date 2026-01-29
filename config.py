@@ -55,8 +55,9 @@ MAX_WHALES_TO_TRACK = int(os.getenv('MAX_WHALES_TO_TRACK', '50'))
 
 # Position Sizing Mode
 # Set to a dollar amount for fixed sizing (e.g., 10.0 = $10 per trade)
-# Set to None or 0 to use Kelly Criterion dynamic sizing
-FIXED_POSITION_SIZE = float(os.getenv('FIXED_POSITION_SIZE', '10.0')) or None
+# Set to 0 or empty to use Kelly Criterion dynamic sizing
+_fixed_size_str = os.getenv('FIXED_POSITION_SIZE', '10.0')
+FIXED_POSITION_SIZE = float(_fixed_size_str) if _fixed_size_str else None
 
 # Whale Discovery Criteria
 MIN_WHALE_PROFIT = float(os.getenv('MIN_WHALE_PROFIT', '5000'))
