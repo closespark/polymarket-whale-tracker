@@ -85,7 +85,7 @@ class MultiTimeframeStrategy:
                 timeframe='15min',
                 base_threshold=88.0,
                 position_multiplier=1.2,
-                min_win_rate=0.70,  # Lowered for more coverage (confidence still filters)
+                min_win_rate=0.80,  # 80% minimum
                 max_whales=None  # Unlimited
             ),
             'hourly': WhaleTimeframeTier(
@@ -93,7 +93,7 @@ class MultiTimeframeStrategy:
                 timeframe='hourly',
                 base_threshold=90.0,
                 position_multiplier=1.0,
-                min_win_rate=0.68,
+                min_win_rate=0.80,  # 80% minimum
                 max_whales=None  # Unlimited
             ),
             '4hour': WhaleTimeframeTier(
@@ -101,7 +101,7 @@ class MultiTimeframeStrategy:
                 timeframe='4hour',
                 base_threshold=92.0,
                 position_multiplier=0.8,
-                min_win_rate=0.65,
+                min_win_rate=0.80,  # 80% minimum
                 max_whales=None  # Unlimited
             ),
             'daily': WhaleTimeframeTier(
@@ -109,7 +109,7 @@ class MultiTimeframeStrategy:
                 timeframe='daily',
                 base_threshold=93.0,
                 position_multiplier=0.7,
-                min_win_rate=0.65,
+                min_win_rate=0.80,  # 80% minimum
                 max_whales=None  # Unlimited
             )
         }

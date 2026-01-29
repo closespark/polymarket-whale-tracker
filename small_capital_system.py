@@ -30,10 +30,10 @@ from embedded_dashboard import EmbeddedDashboard
 
 # Tier requirements for promotion (same as standalone pipeline)
 TIER_REQUIREMENTS = {
-    '15min': {'min_trades': 15, 'min_win_rate': 0.70},
-    'hourly': {'min_trades': 12, 'min_win_rate': 0.68},
-    '4hour': {'min_trades': 8, 'min_win_rate': 0.65},
-    'daily': {'min_trades': 8, 'min_win_rate': 0.65},
+    '15min': {'min_trades': 15, 'min_win_rate': 0.80},
+    'hourly': {'min_trades': 12, 'min_win_rate': 0.80},
+    '4hour': {'min_trades': 8, 'min_win_rate': 0.80},
+    'daily': {'min_trades': 8, 'min_win_rate': 0.80},
 }
 
 # Timeframe durations for market resolution

@@ -61,7 +61,7 @@ FIXED_POSITION_SIZE = float(_fixed_size_str) if _fixed_size_str else None
 
 # Whale Discovery Criteria
 MIN_WHALE_PROFIT = float(os.getenv('MIN_WHALE_PROFIT', '5000'))
-MIN_WHALE_WIN_RATE = float(os.getenv('MIN_WHALE_WIN_RATE', '0.60'))
+MIN_WHALE_WIN_RATE = float(os.getenv('MIN_WHALE_WIN_RATE', '0.80'))
 MIN_WHALE_TRADES = int(os.getenv('MIN_WHALE_TRADES', '50'))
 
 # Monitoring
