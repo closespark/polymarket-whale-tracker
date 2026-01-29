@@ -18,7 +18,6 @@ import asyncio
 from datetime import datetime, timedelta
 import json
 import os
-import random
 
 try:
     import requests
@@ -254,17 +253,15 @@ class PendingPositionTracker:
         # Remove from pending
         self.pending_positions = [p for p in self.pending_positions if p['id'] != position['id']]
 
-        # Try to get ACTUAL market outcome
+        # Get ACTUAL market outcome from API - NO SIMULATION
         token_id = position.get('token_id', '')
         actual_outcome = None
-        outcome_source = 'simulated'
 
         if token_id:
             actual_outcome = self.market_lifecycle.get_resolution(token_id)
 
         if actual_outcome:
             # Use actual market outcome
-            outcome_source = 'actual'
             side = position.get('side', 'BUY')
 
             # Determine if we won based on our side and market outcome
